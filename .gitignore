@@ -6,8 +6,15 @@ dist/
 wheels/
 *.egg-info
 
-# Virtual environments
+# Virtual environments and local caches
 .venv
+.uv-cache/
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
 
 # Generated audio
 audios/
