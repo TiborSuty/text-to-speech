@@ -141,6 +141,12 @@ button:disabled {
   opacity: 0.55;
 }
 
+.generation-status {
+  margin: 20px 0 0;
+  color: #273a43;
+  font-weight: 650;
+}
+
 .error-message {
   margin: 20px 0 0;
   padding: 12px 14px;
@@ -148,6 +154,7 @@ button:disabled {
   border-radius: 6px;
   background: #fff3ed;
   color: #8a2f0a;
+  overflow-wrap: anywhere;
 }
 
 .result-panel {
@@ -176,6 +183,7 @@ audio {
 .summary-panel p {
   margin-bottom: 0;
   line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 640px) {

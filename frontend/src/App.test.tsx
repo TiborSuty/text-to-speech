@@ -66,6 +66,16 @@ describe('App', () => {
     );
   });
 
+  it('announces when generated audio is ready', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(await screen.findByLabelText(/enter text/i), 'Hello world');
+    await user.click(screen.getByRole('button', { name: /generate audio/i }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Audio ready');
+  });
+
   it('shows summarized text returned by the backend', async () => {
     const user = userEvent.setup();
     vi.mocked(generateAudio).mockResolvedValue({

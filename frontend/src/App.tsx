@@ -25,6 +25,11 @@ export default function App() {
     () => (audioUrl ? buildAudioUrl(audioUrl) : null),
     [audioUrl],
   );
+  const generationStatus = isGenerating
+    ? 'Generating audio'
+    : resolvedAudioUrl
+      ? 'Audio ready'
+      : '';
 
   useEffect(() => {
     let isMounted = true;
@@ -139,9 +144,15 @@ export default function App() {
           </label>
 
           <button type="submit" disabled={!canGenerate}>
-            {isGenerating ? 'Generating...' : 'Generate Audio'}
+            {isGenerating ? 'Generating audio' : 'Generate Audio'}
           </button>
         </form>
+
+        {generationStatus ? (
+          <p className="generation-status" role="status">
+            {generationStatus}
+          </p>
+        ) : null}
 
         {error ? (
           <p className="error-message" role="alert">
