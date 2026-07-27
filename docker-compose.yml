@@ -1,0 +1,89 @@
+# Defines the local multi-container stack for the app and Ollama.
+services:
+  # Runs the Ollama model server used by summarization.
+  ollama:
+    # Uses Ollama's official Docker image.
+    image: ollama/ollama:latest
+    # Exposes Ollama on the host for debugging and manual model commands.
+    ports:
+      - "11434:11434"
+    # Persists downloaded model files across container restarts.
+    volumes:
+      - ollama:/root/.ollama
+    # Checks that the Ollama server can answer CLI requests.
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  # Pulls the summarization model into the persistent Ollama volume.
+  ollama-pull:
+    # Reuses the Ollama image because it includes the ollama CLI.
+    image: ollama/ollama:latest
+    # Waits until the Ollama server is ready before pulling the model.
+    depends_on:
+      ollama:
+        condition: service_healthy
+    # Configures the CLI to talk to the Ollama service over Docker networking.
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-deepseek-r1:8b}
+    # Runs a one-shot model pull command.
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["ollama pull ${OLLAMA_MODEL:-deepseek-r1:8b}"]
+    # Keeps the one-shot setup service from restarting after successful completion.
+    restart: "no"
+
+  # Runs the FastAPI backend.
+  backend:
+    # Builds the backend image from the root Dockerfile.
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    # Exposes the API on the same host port used by local development.
+    ports:
+      - "8000:8000"
+    # Points summarization at the Ollama container and matches the pulled model.
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-deepseek-r1:8b}
+    # Persists generated audio files on the host.
+    volumes:
+      - ./audios:/app/audios
+    # Starts the backend after Ollama is healthy and the model pull has completed.
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
+    # Checks the backend health endpoint from inside the container.
+    healthcheck:
+      test: ["CMD", "uv", "run", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # Runs the Vite React frontend.
+  frontend:
+    # Builds the frontend image from the frontend Dockerfile.
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    # Exposes the Vite app on the same host port used by local development.
+    ports:
+      - "5173:5173"
+    # Makes browser requests go directly to the host-exposed backend API.
+    environment:
+      VITE_API_BASE_URL: http://127.0.0.1:8000
+    # Starts the frontend after the backend container has started.
+    depends_on:
+      backend:
+        condition: service_started
+
+# Stores Ollama model files outside the container lifecycle.
+volumes:
+  # Persists downloaded Ollama models.
+  ollama:

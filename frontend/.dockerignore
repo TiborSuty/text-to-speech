@@ -1,0 +1,9 @@
+# Excludes frontend dependencies from Docker build contexts.
+node_modules
+
+# Excludes Vite build and cache output.
+dist
+.vite
+
+# Excludes coverage output.
+coverage

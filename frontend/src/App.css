@@ -1,205 +1,339 @@
+/* Defines global app-level theme values on the document root. */
 :root {
+  /* Sets the default foreground text color. */
   color: #1f2933;
+  /* Sets the default page background color. */
   background: #f4f7f8;
+  /* Starts the font-family declaration used throughout the app. */
   font-family:
+    /* Prefers Inter, then common system sans-serif fonts. */
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    /* Falls back to any available sans-serif font. */
     sans-serif;
+  /* Prevents synthetic bold or italic styling from the browser. */
   font-synthesis: none;
+  /* Optimizes text rendering for readability. */
   text-rendering: optimizeLegibility;
 }
 
+/* Applies predictable sizing to every element. */
 * {
+  /* Includes padding and border in each element's width and height. */
   box-sizing: border-box;
 }
 
+/* Defines base layout constraints for the page body. */
 body {
+  /* Removes the browser's default body margin. */
   margin: 0;
+  /* Prevents the app from becoming unusably narrow. */
   min-width: 320px;
+  /* Makes the body at least as tall as the viewport. */
   min-height: 100vh;
 }
 
+/* Targets form controls that should inherit app typography. */
 button,
 select,
 textarea {
+  /* Makes controls use the same font as the surrounding UI. */
   font: inherit;
 }
 
+/* Styles the outer application layout shell. */
 .app-shell {
+  /* Makes the shell fill the viewport height. */
   min-height: 100vh;
+  /* Adds responsive outer spacing around the main panel. */
   padding: 32px 20px;
 }
 
+/* Styles the main generator panel. */
 .tool-panel {
+  /* Caps the panel width while allowing it to shrink on small screens. */
   width: min(920px, 100%);
+  /* Centers the panel horizontally. */
   margin: 0 auto;
+  /* Adds internal spacing around all panel content. */
   padding: 28px;
+  /* Adds a subtle boundary around the panel. */
   border: 1px solid #d6dee2;
+  /* Rounds the panel corners. */
   border-radius: 8px;
+  /* Gives the panel a white surface over the page background. */
   background: #ffffff;
+  /* Adds depth with a soft shadow. */
   box-shadow: 0 18px 45px rgb(22 36 45 / 10%);
 }
 
+/* Controls spacing below the title group. */
 .title-block {
+  /* Separates the title area from the form. */
   margin-bottom: 24px;
 }
 
+/* Styles the small label above the main title. */
 .eyebrow {
+  /* Removes default margins and adds a small gap below the eyebrow. */
   margin: 0 0 6px;
+  /* Uses a muted green accent color. */
   color: #4f6f52;
+  /* Sets a compact label size. */
   font-size: 0.78rem;
+  /* Makes the eyebrow visually prominent. */
   font-weight: 700;
+  /* Keeps letter spacing neutral. */
   letter-spacing: 0;
+  /* Converts the label to uppercase. */
   text-transform: uppercase;
 }
 
+/* Resets top margins on common text elements. */
 h1,
 h2,
 p {
+  /* Removes browser-default top spacing. */
   margin-top: 0;
 }
 
+/* Styles the primary page heading. */
 h1 {
+  /* Removes extra space below the heading. */
   margin-bottom: 0;
+  /* Sets a dark heading color. */
   color: #10212b;
+  /* Sets the desktop heading size. */
   font-size: 2.75rem;
+  /* Tightens line height for the large heading. */
   line-height: 1.05;
+  /* Keeps heading letter spacing neutral. */
   letter-spacing: 0;
 }
 
+/* Lays out the generator form. */
 .generator-form {
+  /* Uses grid layout for evenly spaced form rows. */
   display: grid;
+  /* Adds vertical spacing between form controls. */
   gap: 18px;
 }
 
+/* Styles each labeled form field. */
 .field {
+  /* Stacks the label text and control vertically. */
   display: grid;
+  /* Adds space between label text and control. */
   gap: 8px;
+  /* Makes field labels slightly bold. */
   font-weight: 650;
 }
 
+/* Applies shared control styles to selects and textareas. */
 select,
 textarea {
+  /* Makes controls fill the available form width. */
   width: 100%;
+  /* Adds a light border around input controls. */
   border: 1px solid #c8d3d8;
+  /* Rounds control corners slightly. */
   border-radius: 6px;
+  /* Keeps controls on a white surface. */
   background: #ffffff;
+  /* Uses the default text color inside controls. */
   color: #1f2933;
 }
 
+/* Styles the language dropdown specifically. */
 select {
+  /* Gives the dropdown an accessible touch target height. */
   min-height: 44px;
+  /* Adds horizontal padding inside the dropdown. */
   padding: 0 12px;
 }
 
+/* Styles the text entry area specifically. */
 textarea {
+  /* Gives the textarea a useful default height. */
   min-height: 220px;
+  /* Allows vertical resizing while preserving layout width. */
   resize: vertical;
+  /* Adds internal spacing around entered text. */
   padding: 12px;
+  /* Improves readability for multi-line text. */
   line-height: 1.5;
 }
 
+/* Styles keyboard focus for major interactive controls. */
 select:focus,
 textarea:focus,
 button:focus-visible {
+  /* Adds a visible focus ring. */
   outline: 3px solid #8bc5b4;
+  /* Moves the focus ring slightly away from the element. */
   outline-offset: 2px;
 }
 
+/* Styles the checkbox label row. */
 .checkbox-row {
+  /* Places the checkbox and label text on one row. */
   display: flex;
+  /* Vertically centers the checkbox and label text. */
   align-items: center;
+  /* Adds space between checkbox and label text. */
   gap: 10px;
+  /* Shrinks the row to the size of its content. */
   width: fit-content;
+  /* Uses the standard control text color. */
   color: #273a43;
+  /* Makes the row label slightly bold. */
   font-weight: 650;
 }
 
+/* Styles the checkbox input itself. */
 .checkbox-row input {
+  /* Sets a consistent checkbox width. */
   width: 18px;
+  /* Sets a consistent checkbox height. */
   height: 18px;
+  /* Uses the app accent color for the checked state. */
   accent-color: #2f7d67;
 }
 
+/* Styles the primary submit button. */
 button {
+  /* Aligns the button to the left edge of the form on larger screens. */
   justify-self: start;
+  /* Gives the button an accessible minimum height. */
   min-height: 44px;
+  /* Adds horizontal padding around the button label. */
   padding: 0 18px;
+  /* Removes the browser-default border. */
   border: 0;
+  /* Rounds button corners. */
   border-radius: 6px;
+  /* Applies the primary action background color. */
   background: #2f7d67;
+  /* Makes the button text white. */
   color: #ffffff;
+  /* Makes the button label visually strong. */
   font-weight: 750;
+  /* Shows that the button is clickable. */
   cursor: pointer;
 }
 
+/* Styles the submit button hover state when it is enabled. */
 button:hover:not(:disabled) {
+  /* Darkens the primary action color on hover. */
   background: #286b58;
 }
 
+/* Styles disabled buttons. */
 button:disabled {
+  /* Shows that the disabled button cannot be clicked. */
   cursor: not-allowed;
+  /* Reduces contrast to communicate disabled state. */
   opacity: 0.55;
 }
 
+/* Styles the generation status message. */
 .generation-status {
+  /* Adds spacing above the status and removes bottom margin. */
   margin: 20px 0 0;
+  /* Uses standard body text color. */
   color: #273a43;
+  /* Makes the status text slightly bold. */
   font-weight: 650;
 }
 
+/* Styles request error messages. */
 .error-message {
+  /* Adds spacing above the alert and removes bottom margin. */
   margin: 20px 0 0;
+  /* Adds internal spacing around the error text. */
   padding: 12px 14px;
+  /* Adds a strong left accent border for the alert. */
   border-left: 4px solid #c2410c;
+  /* Rounds the alert corners. */
   border-radius: 6px;
+  /* Uses a warm warning background. */
   background: #fff3ed;
+  /* Uses a dark warning text color. */
   color: #8a2f0a;
+  /* Prevents long error text from overflowing the panel. */
   overflow-wrap: anywhere;
 }
 
+/* Styles the generated result area. */
 .result-panel {
+  /* Uses grid layout for the audio player and summary. */
   display: grid;
+  /* Adds spacing between result elements. */
   gap: 18px;
+  /* Separates the result panel from the form/status area. */
   margin-top: 24px;
 }
 
+/* Styles the browser audio player. */
 audio {
+  /* Makes the audio controls span the full panel width. */
   width: 100%;
 }
 
+/* Styles the optional generated summary panel. */
 .summary-panel {
+  /* Adds internal spacing around summary content. */
   padding: 16px;
+  /* Adds a subtle border around the summary. */
   border: 1px solid #d6dee2;
+  /* Rounds the summary panel corners. */
   border-radius: 8px;
+  /* Uses a slightly tinted background for contrast. */
   background: #f8fbfb;
 }
 
+/* Styles the heading inside the summary panel. */
 .summary-panel h2 {
+  /* Adds a small gap below the summary heading. */
   margin-bottom: 8px;
+  /* Keeps the summary heading compact. */
   font-size: 1rem;
+  /* Keeps heading letter spacing neutral. */
   letter-spacing: 0;
 }
 
+/* Styles the paragraph inside the summary panel. */
 .summary-panel p {
+  /* Removes bottom spacing after the final summary paragraph. */
   margin-bottom: 0;
+  /* Improves readability for generated text. */
   line-height: 1.55;
+  /* Prevents long generated text from overflowing the panel. */
   overflow-wrap: anywhere;
 }
 
+/* Applies smaller-screen layout adjustments. */
 @media (max-width: 640px) {
+  /* Reduces outer shell spacing on narrow screens. */
   .app-shell {
+    /* Uses tighter padding on mobile. */
     padding: 16px 12px;
   }
 
+  /* Reduces panel padding on narrow screens. */
   .tool-panel {
+    /* Keeps the panel comfortable on mobile without wasting space. */
     padding: 18px;
   }
 
+  /* Reduces the main heading size on narrow screens. */
   h1 {
+    /* Keeps the title from dominating mobile layouts. */
     font-size: 2rem;
   }
 
+  /* Makes the submit button easier to tap on narrow screens. */
   button {
+    /* Lets the button span the full available width on mobile. */
     width: 100%;
   }
 }
