@@ -1,18 +1,13 @@
-# Excludes Git metadata from Docker build contexts.
 .git
 
-# Excludes local Python environments and caches.
 .venv
 .uv-cache
 __pycache__
 *.pyc
 
-# Excludes generated audio files from images.
 audios
 
-# Excludes frontend artifacts from the backend image context.
 frontend
 
-# Excludes local test and coverage artifacts.
 .pytest_cache
 coverage

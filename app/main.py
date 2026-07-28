@@ -1,313 +1,754 @@
-# Imports asyncio so the SSE stream can wait between status checks.
 import asyncio
-# Imports json so job status payloads can be serialized into SSE messages.
+
+from contextlib import asynccontextmanager
+
 import json
-# Imports AsyncIterator for the SSE generator return type.
+
+import os
+
 from collections.abc import AsyncIterator
-# Imports Lock so only one audio file generation runs at a time.
+
+from datetime import UTC, datetime, timedelta
+
 from threading import Lock
 
-# Imports FastAPI's background task helper, application class, and HTTP exception helper.
-from fastapi import BackgroundTasks, FastAPI, HTTPException
-# Imports the middleware used to let the Vite frontend call this API in dev.
-from fastapi.middleware.cors import CORSMiddleware
-# Imports StreamingResponse so the API can return Server-Sent Events.
-from fastapi.responses import StreamingResponse
-# Imports FastAPI's static-file server for exposing generated audio files.
-from fastapi.staticfiles import StaticFiles
 
-# Imports the audio output directory and the function that writes audio files.
-from app.audio import AUDIO_DIR, generate_audio_file
-# Imports helpers that store and update asynchronous audio job state.
+from fastapi import FastAPI, HTTPException, Query, Response
+
+from fastapi.middleware.cors import CORSMiddleware
+
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+
+
+from app.audio import (
+    AUDIO_DIR,
+    AudioGenerationCancelled,
+    delete_audio_file,
+    delete_expired_audio_files,
+    generate_audio_file,
+    generate_segmented_audio_file,
+)
+
 from app.jobs import (
     TERMINAL_JOB_STATUSES,
     AudioJob,
     complete_audio_job_record,
     create_audio_job_record,
+    delete_audio_job_record,
     fail_audio_job_record,
+    finalize_audio_job_cancellation,
     get_audio_job_record,
+    initialize_audio_job_store,
+    list_audio_job_records,
+    list_completed_audio_job_records,
+    mark_audio_job_output_missing,
+    recover_interrupted_audio_jobs,
+    remove_expired_audio_job_records,
+    request_audio_job_cancellation,
+    update_audio_job_progress,
     update_audio_job_status,
 )
-# Imports supported language data and the language-code validation helper.
-from app.languages import SUPPORTED_LANGUAGES, is_supported_language_code
-# Imports Pydantic models used as request and response schemas.
+
+from app.languages import (
+    SUPPORTED_LANGUAGES,
+    get_default_voice,
+    is_supported_language_code,
+    is_supported_voice,
+)
+
 from app.models import (
+    AUDIO_MAX_TEXT_CHARACTERS,
+    AppConfigResponse,
     AudioJobCreateResponse,
     AudioJobStatusResponse,
     AudioRequest,
     AudioResponse,
+    AudioSegment,
     HealthResponse,
     LanguageOption,
+    PodcastScriptRequest,
+    PodcastScriptResponse,
+    PodcastWorkflowApprovalRequest,
+    PodcastWorkflowResponse,
 )
-# Imports the optional summarization error and function used before audio generation.
-from app.text import SummarizationError, summarize_text
 
-# Creates the FastAPI application and gives it a title for API docs.
-app = FastAPI(title="AI Podcaster API")
+from app.text import (
+    PodcastScriptError,
+    SummarizationError,
+    create_podcast_script,
+    summarize_text,
+)
 
-# Registers CORS middleware so browser-based frontend requests are accepted.
+from app.storage import AudioObjectStorage, create_audio_object_storage
+
+from app.worker import AudioJobTask, AudioWorkerPool, get_audio_worker_count
+
+from app.workflow import (
+    PodcastWorkflowError,
+    PodcastWorkflowNotFoundError,
+    approve_podcast_workflow,
+    get_podcast_workflow,
+    get_podcast_workflow_approval,
+    link_podcast_audio_job,
+    start_podcast_workflow,
+)
+
+
+audio_storage = create_audio_object_storage()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+
+    initialize_audio_job_store()
+
+    audio_storage.initialize()
+
+    recover_interrupted_audio_jobs()
+
+    reconcile_audio_job_storage()
+
+    cleanup_expired_audio_jobs()
+
+    audio_worker_pool.start()
+
+    try:
+        yield
+
+    finally:
+        audio_worker_pool.shutdown()
+
+
+app = FastAPI(title="AI Podcaster API", lifespan=lifespan)
+
+
+DEFAULT_AUDIO_RETENTION_HOURS = 168.0
+
+
+def get_audio_retention_hours() -> float:
+
+    try:
+        return float(
+            os.getenv(
+                "AUDIO_RETENTION_HOURS",
+                str(DEFAULT_AUDIO_RETENTION_HOURS),
+            )
+        )
+
+    except ValueError:
+        return DEFAULT_AUDIO_RETENTION_HOURS
+
+
+AUDIO_RETENTION_HOURS = get_audio_retention_hours()
+
+
 app.add_middleware(
-    # Tells FastAPI which middleware class to install.
     CORSMiddleware,
-    # Lists the local development frontend origins allowed to call the API.
     allow_origins=[
-        # Allows Vite when opened through localhost on the default port.
         "http://localhost:5173",
-        # Allows Vite when opened through 127.0.0.1 on the default port.
         "http://127.0.0.1:5173",
-        # Allows Vite when it falls back to the next development port.
         "http://localhost:5174",
-        # Allows the fallback Vite port through the numeric loopback address.
         "http://127.0.0.1:5174",
     ],
-    # Allows credentialed requests if the frontend later adds cookies or auth.
     allow_credentials=True,
-    # Allows every HTTP method so the POST audio endpoint works from the UI.
     allow_methods=["*"],
-    # Allows every request header, including JSON content-type headers.
     allow_headers=["*"],
 )
 
-# Ensures the audio output folder exists before it is mounted or written to.
+
 AUDIO_DIR.mkdir(exist_ok=True)
-# Serves files in the audio directory under the /audios URL path.
-app.mount("/audios", StaticFiles(directory=AUDIO_DIR), name="audios")
-
-# Serializes background audio jobs because the current audio module writes one shared file.
-audio_generation_lock = Lock()
 
 
-# Converts an internal job snapshot into the public API response model.
 def audio_job_to_response(job: AudioJob) -> AudioJobStatusResponse:
-    # Builds the response payload from the job's current snapshot.
+
     return AudioJobStatusResponse(
-        # Copies the job identifier into the response.
         job_id=job.job_id,
-        # Copies the current status into the response.
         status=job.status,
-        # Copies the completed audio URL when one exists.
+        queue_position=(
+            audio_worker_pool.queue_position(job.job_id)
+            if job.status == "queued"
+            else None
+        ),
+        progress=job.progress,
+        language_code=job.language_code,
+        voice=job.voice,
+        summarize=job.summarize,
+        text_preview=job.text_preview,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
         audio_url=job.audio_url,
-        # Copies the completed summary text when one exists.
         summarized_text=job.summarized_text,
-        # Copies the failure message when one exists.
         error=job.error,
     )
 
 
-# Loads one job or raises a 404 response when the ID is unknown.
 def get_existing_audio_job(job_id: str) -> AudioJob:
-    # Reads the job snapshot from the in-memory store.
+
     job = get_audio_job_record(job_id)
-    # Checks whether the job exists.
+
     if job is None:
-        # Reports unknown job IDs as normal API not-found errors.
         raise HTTPException(status_code=404, detail="Audio job not found")
-    # Returns the found job snapshot.
+
     return job
 
 
-# Runs the blocking summarization and audio generation work for one job.
-def run_audio_job(job_id: str, request: AudioRequest) -> None:
-    # Ensures only one job writes to the shared audio output file at a time.
-    with audio_generation_lock:
-        # Starts with the request text as the content that should become audio.
-        text_for_audio = request.text
-        # Tracks optional summary text generated before audio.
-        summarized_text = None
+def delete_audio_for_job(job: AudioJob) -> None:
 
-        # Converts internal failures into job status updates instead of HTTP responses.
-        try:
-            # Checks whether this job should summarize the text before speech.
-            if request.summarize:
-                # Marks the job as currently using the local summarizer.
-                update_audio_job_status(job_id, "summarizing")
-                # Generates the text summary.
-                summarized_text = summarize_text(request.text)
-                # Uses the summary as the text for speech generation.
-                text_for_audio = summarized_text
+    if job.object_key is None:
+        return
 
-            # Marks the job as currently generating the audio file.
-            update_audio_job_status(job_id, "generating")
-            # Generates the audio file and receives its file name.
-            file_name = generate_audio_file(text_for_audio, request.language_code)
-        # Handles failures from the local Ollama summarization step.
-        except SummarizationError as exc:
-            # Stores a clear, user-facing summarization failure on the job.
-            fail_audio_job_record(job_id, str(exc))
-        # Handles any remaining text-to-speech or filesystem failure.
-        except Exception:
-            # Stores the same stable audio-generation failure message used by the sync endpoint.
-            fail_audio_job_record(job_id, "Could not generate audio")
-        # Runs only after successful generation.
-        else:
-            # Stores the final audio URL and optional summary on the job.
-            complete_audio_job_record(
-                # Identifies which job should be completed.
-                job_id,
-                # Builds the URL that the frontend can pass to the audio element.
-                f"/audios/{file_name}",
-                # Preserves the optional summary in the completion event.
-                summarized_text,
+    audio_storage.delete(job.object_key)
+
+
+def store_generated_audio_file(file_name: str) -> str:
+
+    object_key = file_name
+
+    source_path = AUDIO_DIR / file_name
+
+    try:
+        audio_storage.put_file(source_path, object_key)
+
+    finally:
+        stored_local_path = audio_storage.local_path(object_key)
+
+        if (
+            stored_local_path is None
+            or stored_local_path.resolve() != source_path.resolve()
+        ):
+            delete_audio_file(file_name)
+
+    return object_key
+
+
+def cleanup_expired_audio_jobs() -> None:
+
+    if AUDIO_RETENTION_HOURS <= 0:
+        return
+
+    cutoff = datetime.now(UTC) - timedelta(hours=AUDIO_RETENTION_HOURS)
+
+    expired_jobs = remove_expired_audio_job_records(cutoff)
+
+    for job in expired_jobs:
+        delete_audio_for_job(job)
+
+    delete_expired_audio_files(cutoff)
+
+
+def reconcile_audio_job_storage(
+    storage: AudioObjectStorage | None = None,
+) -> None:
+
+    selected_storage = storage or audio_storage
+
+    for job in list_completed_audio_job_records():
+        if job.object_key is None:
+            continue
+
+        if selected_storage.exists(job.object_key):
+            continue
+
+        mark_audio_job_output_missing(job.job_id)
+
+
+def resolve_audio_voice(request: AudioRequest) -> str:
+
+    if not is_supported_language_code(request.language_code):
+        raise HTTPException(status_code=422, detail="Unsupported language code")
+
+    voice = request.voice or get_default_voice(request.language_code)
+
+    if voice is None or not is_supported_voice(request.language_code, voice):
+        raise HTTPException(
+            status_code=422,
+            detail="Unsupported voice for selected language",
+        )
+
+    for segment in request.segments or []:
+        if not is_supported_voice(request.language_code, segment.voice):
+            raise HTTPException(
+                status_code=422,
+                detail="Unsupported segment voice for selected language",
             )
 
+    return voice
 
-# Formats one job snapshot as a Server-Sent Event message.
+
+def finish_audio_job_cancellation(
+    job_id: str,
+    file_name: str | None = None,
+    object_key: str | None = None,
+) -> bool:
+
+    job = get_audio_job_record(job_id)
+
+    if job is None:
+        return True
+
+    if job.status not in {"cancel_requested", "cancelled"}:
+        return False
+
+    try:
+        if object_key is not None:
+            audio_storage.delete(object_key)
+
+        elif file_name is not None:
+            delete_audio_file(file_name)
+
+    finally:
+        finalize_audio_job_cancellation(job_id)
+
+    return True
+
+
+def run_audio_job(job_id: str, request: AudioRequest, voice: str) -> None:
+
+    text_for_audio = request.text
+
+    summarized_text = None
+
+    file_name = None
+    object_key = None
+
+    if finish_audio_job_cancellation(job_id):
+        return
+
+    try:
+        if request.summarize:
+            if not update_audio_job_status(job_id, "summarizing"):
+                finish_audio_job_cancellation(job_id)
+                return
+
+            summarized_text = summarize_text(request.text)
+
+            text_for_audio = summarized_text
+
+            if finish_audio_job_cancellation(job_id):
+                return
+
+        if not update_audio_job_status(job_id, "generating"):
+            finish_audio_job_cancellation(job_id)
+            return
+
+        def report_audio_progress(progress: int) -> bool:
+
+            return update_audio_job_progress(job_id, progress)
+
+        if request.segments:
+            file_name = generate_segmented_audio_file(
+                [(segment.text, segment.voice) for segment in request.segments],
+                request.language_code,
+                job_id,
+                progress_callback=report_audio_progress,
+            )
+        else:
+            file_name = generate_audio_file(
+                text_for_audio,
+                request.language_code,
+                voice,
+                job_id,
+                progress_callback=report_audio_progress,
+            )
+
+        if finish_audio_job_cancellation(job_id, file_name=file_name):
+            return
+
+        object_key = store_generated_audio_file(file_name)
+
+        if finish_audio_job_cancellation(job_id, object_key=object_key):
+            return
+
+        if not complete_audio_job_record(job_id, object_key, summarized_text):
+            finish_audio_job_cancellation(job_id, object_key=object_key)
+
+    except SummarizationError as exc:
+        if not finish_audio_job_cancellation(job_id, file_name, object_key):
+            fail_audio_job_record(job_id, str(exc))
+
+    except AudioGenerationCancelled:
+        finish_audio_job_cancellation(job_id, file_name, object_key)
+
+    except Exception:
+        if not finish_audio_job_cancellation(job_id, file_name, object_key):
+            fail_audio_job_record(job_id, "Could not generate audio")
+
+
+def fail_unhandled_audio_job(job_id: str) -> None:
+
+    fail_audio_job_record(job_id, "Could not generate audio")
+
+
+audio_worker_pool = AudioWorkerPool(
+    processor=run_audio_job,
+    worker_count=get_audio_worker_count(),
+    error_handler=fail_unhandled_audio_job,
+)
+
+audio_job_enqueue_lock = Lock()
+
+
 def format_audio_job_event(job: AudioJob) -> str:
-    # Converts the job snapshot into the public response model.
+
     response = audio_job_to_response(job)
-    # Serializes the response model to compact JSON.
-    data = json.dumps(response.model_dump(), separators=(",", ":"))
-    # Wraps the JSON payload in SSE's data-message format.
-    return f"data: {data}\n\n"
+
+    data = json.dumps(response.model_dump(mode="json"), separators=(",", ":"))
+
+    return f"retry: 1000\ndata: {data}\n\n"
 
 
-# Streams job status changes until the job reaches a terminal state.
 async def stream_audio_job_events(job_id: str) -> AsyncIterator[str]:
-    # Tracks the last payload so duplicate polling results are not resent.
+
     last_event = None
 
-    # Keeps the stream open until done or failed.
     while True:
-        # Reads the latest job snapshot.
         job = get_existing_audio_job(job_id)
-        # Formats the latest snapshot as an SSE message.
+
         event = format_audio_job_event(job)
-        # Emits only changed snapshots to reduce unnecessary frontend updates.
+
         if event != last_event:
-            # Stores the event so the next loop can detect duplicates.
             last_event = event
-            # Sends the event to the connected browser.
+
             yield event
 
-        # Stops streaming after the job is done or failed.
         if job.status in TERMINAL_JOB_STATUSES:
-            # Leaves the generator after sending the terminal event.
             break
 
-        # Waits briefly before checking job state again.
         await asyncio.sleep(0.25)
 
 
-# Registers the health-check endpoint and documents its response schema.
 @app.get("/api/health", response_model=HealthResponse)
-# Handles GET /api/health requests.
 def health() -> HealthResponse:
-    # Returns a simple status payload so callers know the API is running.
+
     return HealthResponse(status="ok")
 
 
-# Registers the language-list endpoint and documents each returned item.
+@app.get("/api/config", response_model=AppConfigResponse)
+def get_app_config() -> AppConfigResponse:
+
+    return AppConfigResponse(max_text_characters=AUDIO_MAX_TEXT_CHARACTERS)
+
+
 @app.get("/api/languages", response_model=list[LanguageOption])
-# Handles GET /api/languages requests.
-def get_languages() -> list[dict[str, str]]:
-    # Returns the complete list of language labels and Kokoro language codes.
+def get_languages() -> list[dict[str, object]]:
+
     return SUPPORTED_LANGUAGES
 
 
-# Registers the async audio-job creation endpoint.
-@app.post("/api/audio-jobs", response_model=AudioJobCreateResponse, status_code=202)
-# Handles POST /api/audio-jobs requests with a validated JSON request body.
-def create_audio_job(
-    # Receives the validated audio-generation request.
+@app.post("/api/podcast-scripts", response_model=PodcastScriptResponse)
+def generate_podcast_script(
+    request: PodcastScriptRequest,
+) -> PodcastScriptResponse:
+
+    try:
+        return create_podcast_script(request)
+
+    except PodcastScriptError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/podcast-workflows", response_model=PodcastWorkflowResponse)
+def create_podcast_workflow(
+    request: PodcastScriptRequest,
+) -> PodcastWorkflowResponse:
+
+    try:
+        return start_podcast_workflow(request)
+
+    except PodcastWorkflowError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get(
+    "/api/podcast-workflows/{workflow_id}",
+    response_model=PodcastWorkflowResponse,
+)
+def read_podcast_workflow(workflow_id: str) -> PodcastWorkflowResponse:
+
+    try:
+        return get_podcast_workflow(workflow_id)
+
+    except PodcastWorkflowNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    except PodcastWorkflowError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def enqueue_audio_job(
     request: AudioRequest,
-    # Receives FastAPI's background task collector for work after the response.
-    background_tasks: BackgroundTasks,
+    *,
+    job_id: str | None = None,
 ) -> AudioJobCreateResponse:
-    # Rejects language codes that are not in the supported language list.
-    if not is_supported_language_code(request.language_code):
-        # Raises a 422 response so the frontend sees a validation-style error.
-        raise HTTPException(status_code=422, detail="Unsupported language code")
 
-    # Creates a queued job record before the background work starts.
-    job = create_audio_job_record()
-    # Schedules the blocking generation work to run after this response is sent.
-    background_tasks.add_task(run_audio_job, job.job_id, request)
-    # Returns the job ID immediately so the frontend can open an SSE connection.
-    return AudioJobCreateResponse(job_id=job.job_id)
+    with audio_job_enqueue_lock:
+        if job_id is not None and get_audio_job_record(job_id) is not None:
+            return AudioJobCreateResponse(job_id=job_id)
+
+        voice = resolve_audio_voice(request)
+
+        cleanup_expired_audio_jobs()
+
+        job = create_audio_job_record(
+            language_code=request.language_code,
+            voice=voice,
+            text=request.text,
+            summarize=request.summarize,
+            job_id=job_id,
+        )
+
+        audio_worker_pool.submit(
+            AudioJobTask(
+                job_id=job.job_id,
+                request=request,
+                voice=voice,
+            )
+        )
+
+        return AudioJobCreateResponse(job_id=job.job_id)
 
 
-# Registers a polling-friendly status endpoint for async audio jobs.
+@app.post(
+    "/api/podcast-workflows/{workflow_id}/approve",
+    response_model=AudioJobCreateResponse,
+    status_code=202,
+)
+def approve_and_create_podcast_audio(
+    workflow_id: str,
+    approval: PodcastWorkflowApprovalRequest,
+) -> AudioJobCreateResponse:
+
+    preview_request = AudioRequest(
+        text="\n\n".join(segment.text for segment in approval.script.segments),
+        language_code=approval.language_code,
+        voice=approval.host_voice,
+        summarize=False,
+        segments=[
+            AudioSegment(
+                speaker=segment.speaker,
+                text=segment.text,
+                voice=(
+                    approval.host_voice
+                    if segment.speaker == "host"
+                    else approval.guest_voice
+                ),
+            )
+            for segment in approval.script.segments
+        ],
+    )
+
+    resolve_audio_voice(preview_request)
+
+    try:
+        approve_podcast_workflow(workflow_id, approval)
+
+        persisted_approval = get_podcast_workflow_approval(workflow_id)
+
+    except PodcastWorkflowNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    except PodcastWorkflowError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    audio_request = AudioRequest(
+        text="\n\n".join(
+            segment.text for segment in persisted_approval.script.segments
+        ),
+        language_code=persisted_approval.language_code,
+        voice=persisted_approval.host_voice,
+        summarize=False,
+        segments=[
+            AudioSegment(
+                speaker=segment.speaker,
+                text=segment.text,
+                voice=(
+                    persisted_approval.host_voice
+                    if segment.speaker == "host"
+                    else persisted_approval.guest_voice
+                ),
+            )
+            for segment in persisted_approval.script.segments
+        ],
+    )
+
+    response = enqueue_audio_job(audio_request, job_id=workflow_id)
+
+    try:
+        link_podcast_audio_job(workflow_id, response.job_id)
+
+    except PodcastWorkflowError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return response
+
+
+@app.post("/api/audio-jobs", response_model=AudioJobCreateResponse, status_code=202)
+def create_audio_job(
+    request: AudioRequest,
+) -> AudioJobCreateResponse:
+
+    return enqueue_audio_job(request)
+
+
+@app.get("/api/audio-jobs", response_model=list[AudioJobStatusResponse])
+def get_audio_jobs(
+    limit: int = Query(default=20, ge=1, le=100),
+) -> list[AudioJobStatusResponse]:
+
+    cleanup_expired_audio_jobs()
+
+    return [audio_job_to_response(job) for job in list_audio_job_records(limit)]
+
+
 @app.get("/api/audio-jobs/{job_id}", response_model=AudioJobStatusResponse)
-# Handles GET /api/audio-jobs/{job_id} requests.
 def get_audio_job(job_id: str) -> AudioJobStatusResponse:
-    # Loads the job or raises 404 when it does not exist.
+
     job = get_existing_audio_job(job_id)
-    # Returns the current job status payload.
+
     return audio_job_to_response(job)
 
 
-# Registers the Server-Sent Events endpoint for async audio job updates.
+@app.post(
+    "/api/audio-jobs/{job_id}/cancel",
+    response_model=AudioJobStatusResponse,
+)
+def cancel_audio_job(job_id: str) -> AudioJobStatusResponse:
+
+    job = request_audio_job_cancellation(job_id)
+
+    if job is None:
+        raise HTTPException(status_code=404, detail="Audio job not found")
+
+    audio_worker_pool.cancel_pending(job_id)
+
+    return audio_job_to_response(job)
+
+
+def build_audio_object_response(
+    object_key: str,
+    download_filename: str | None = None,
+) -> Response:
+
+    if not audio_storage.exists(object_key):
+        raise HTTPException(status_code=404, detail="Audio file not found")
+
+    presigned_url = audio_storage.presigned_get_url(
+        object_key,
+        download_filename,
+    )
+
+    if presigned_url is not None:
+        return RedirectResponse(url=presigned_url, status_code=307)
+
+    file_path = audio_storage.local_path(object_key)
+
+    if file_path is None or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Audio file not found")
+
+    return FileResponse(
+        path=file_path,
+        media_type="audio/wav",
+        filename=download_filename,
+    )
+
+
+@app.get("/api/audio-files/{object_key}")
+def play_audio_file(object_key: str) -> Response:
+
+    return build_audio_object_response(object_key)
+
+
+@app.get("/api/audio-jobs/{job_id}/download")
+def download_audio_job(job_id: str) -> Response:
+
+    job = get_existing_audio_job(job_id)
+
+    if job.status != "done" or job.object_key is None:
+        raise HTTPException(status_code=404, detail="Audio file not found")
+
+    return build_audio_object_response(
+        job.object_key,
+        download_filename=job.object_key,
+    )
+
+
 @app.get("/api/audio-jobs/{job_id}/events")
-# Handles GET /api/audio-jobs/{job_id}/events requests.
 def get_audio_job_events(job_id: str) -> StreamingResponse:
-    # Validates the job ID before opening a streaming response.
+
     get_existing_audio_job(job_id)
-    # Returns a streaming response that EventSource can consume.
+
     return StreamingResponse(
-        # Streams status payloads until the job reaches done or failed.
         stream_audio_job_events(job_id),
-        # Uses the SSE content type expected by browsers.
         media_type="text/event-stream",
-        # Sends headers that discourage buffering of live events.
         headers={
-            # Prevents browsers and proxies from caching live job events.
             "Cache-Control": "no-cache",
-            # Hints to reverse proxies that this response should not be buffered.
             "X-Accel-Buffering": "no",
         },
     )
 
 
-# Registers the audio-generation endpoint and documents its response schema.
-@app.post("/api/audio", response_model=AudioResponse)
-# Handles POST /api/audio requests with a validated JSON request body.
-def create_audio(request: AudioRequest) -> AudioResponse:
-    # Rejects language codes that are not in the supported language list.
-    if not is_supported_language_code(request.language_code):
-        # Raises a 422 response so the frontend sees a validation-style error.
-        raise HTTPException(status_code=422, detail="Unsupported language code")
+@app.delete("/api/audio-jobs/{job_id}", status_code=204)
+def delete_audio_job(job_id: str) -> Response:
 
-    # Starts with the user-provided text as the text that will become audio.
+    job = get_existing_audio_job(job_id)
+
+    if job.status not in TERMINAL_JOB_STATUSES:
+        raise HTTPException(
+            status_code=409, detail="Active audio jobs cannot be deleted"
+        )
+
+    delete_audio_for_job(job)
+
+    deleted_job = delete_audio_job_record(job_id)
+
+    if deleted_job is None:
+        raise HTTPException(status_code=404, detail="Audio job not found")
+
+    return Response(status_code=204)
+
+
+@app.post("/api/audio", response_model=AudioResponse)
+def create_audio(request: AudioRequest) -> AudioResponse:
+
+    voice = resolve_audio_voice(request)
+
     text_for_audio = request.text
-    # Tracks the generated summary, or stays None when summarization is off.
+
     summarized_text = None
 
-    # Wraps summarization and audio generation so internal failures become HTTP errors.
     try:
-        # Checks whether the caller requested text summarization before speech.
         if request.summarize:
-            # Produces a shorter version of the submitted text.
             summarized_text = summarize_text(request.text)
-            # Uses the summary, rather than the original text, for audio generation.
+
             text_for_audio = summarized_text
 
-        # Generates the audio file and receives the file name to expose in the response.
-        file_name = generate_audio_file(text_for_audio, request.language_code)
-    # Handles failures from the local Ollama summarization step.
+        if request.segments:
+            file_name = generate_segmented_audio_file(
+                [(segment.text, segment.voice) for segment in request.segments],
+                request.language_code,
+            )
+        else:
+            file_name = generate_audio_file(
+                text_for_audio,
+                request.language_code,
+                voice,
+            )
+
+        object_key = store_generated_audio_file(file_name)
+
     except SummarizationError as exc:
-        # Raises a 503 response because the local summarizer dependency is unavailable.
         raise HTTPException(
-            # Marks the failure as an unavailable local dependency.
             status_code=503,
-            # Sends the actionable summarization setup message to the frontend.
             detail=str(exc),
-        # Chains the summarization exception for server-side debugging.
-        ) from exc
-    # Converts any summarizer or TTS exception into an API response.
-    except Exception as exc:
-        # Raises a 500 response while preserving the original exception as the cause.
-        raise HTTPException(
-            # Marks the failure as an internal server error.
-            status_code=500,
-            # Sends a stable user-facing error message.
-            detail="Could not generate audio",
-        # Chains the original exception for server-side debugging.
         ) from exc
 
-    # Builds the successful response payload for the frontend.
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not generate audio",
+        ) from exc
+
     return AudioResponse(
-        # Provides the browser-accessible URL for the generated audio file.
-        audio_url=f"/audios/{file_name}",
-        # Includes the summary only when summarization was requested.
+        audio_url=f"/api/audio-files/{object_key}",
         summarized_text=summarized_text,
     )

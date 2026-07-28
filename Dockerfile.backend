@@ -1,32 +1,22 @@
-# Uses the uv image with Python 3.14 to match pyproject.toml.
 FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
 
-# Sets the working directory used by the backend container.
 WORKDIR /app
 
-# Keeps Python logs visible immediately and makes uv copy dependencies into the venv.
 ENV PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy
 
-# Installs native libraries used by audio generation and speech tooling.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends espeak-ng libsndfile1 \
+    && apt-get install -y --no-install-recommends build-essential espeak-ng libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copies dependency metadata first so Docker can cache dependency installation.
 COPY pyproject.toml uv.lock README.md ./
 
-# Installs only runtime dependencies into the project environment.
 RUN uv sync --frozen --no-dev
 
-# Copies the backend application package into the image.
 COPY app ./app
 
-# Creates the audio output directory inside the image.
-RUN mkdir -p audios
+RUN mkdir -p audios data
 
-# Documents the backend HTTP port exposed by uvicorn.
 EXPOSE 8000
 
-# Runs the FastAPI backend on all container interfaces.
 CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

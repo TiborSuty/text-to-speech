@@ -1,57 +1,163 @@
-# Imports Path so the app can build filesystem paths portably.
+from datetime import datetime
 from pathlib import Path
 
-# Imports NumPy to combine generated audio chunks into one array.
+from collections.abc import Callable
+
+from uuid import uuid4
+
+
 import numpy as np
-# Imports SoundFile to write the generated waveform as a WAV file.
+
 import soundfile as sf
-# Imports Kokoro's pipeline class, which turns text into speech audio.
+
 from kokoro import KPipeline
 
-# Points to the repository-level audios directory where generated files are stored.
+
 AUDIO_DIR = Path(__file__).resolve().parent.parent / "audios"
-# Uses one stable output file name so each generation replaces the previous audio.
-AUDIO_FILE_NAME = "audio.wav"
-# Sets the sample rate expected by the generated Kokoro audio.
+
 AUDIO_SAMPLE_RATE = 24000
-# Selects the Kokoro voice used for generated speech.
-VOICE = "af_heart"
+
+PODCAST_SEGMENT_PAUSE_SECONDS = 0.35
 
 
-# Deletes old generated audio files before writing a new one.
-def clear_audio_directory(audio_dir: Path = AUDIO_DIR) -> None:
-    # Creates the audio directory if it does not already exist.
-    audio_dir.mkdir(exist_ok=True)
-
-    # Iterates over every item currently in the audio output directory.
-    for file_path in audio_dir.iterdir():
-        # Only removes files, leaving any nested directories untouched.
-        if file_path.is_file():
-            # Deletes the old audio file from disk.
-            file_path.unlink()
+class AudioGenerationCancelled(Exception):
+    pass
 
 
-# Generates a speech WAV file for the given text and language code.
-def generate_audio_file(text: str, language_code: str) -> str:
-    # Clears previous generated files so the output directory stays predictable.
-    clear_audio_directory()
+def build_audio_file_name(output_id: str) -> str:
 
-    # Creates a Kokoro pipeline configured for the requested language.
+    if not output_id or not output_id.isalnum():
+        raise ValueError("Audio output ID must be alphanumeric")
+
+    return f"{output_id}.wav"
+
+
+def delete_audio_file(file_name: str, audio_dir: Path = AUDIO_DIR) -> None:
+
+    if Path(file_name).name != file_name:
+        raise ValueError("Audio file name must not contain a path")
+
+    (audio_dir / file_name).unlink(missing_ok=True)
+
+
+def delete_expired_audio_files(
+    cutoff: datetime,
+    audio_dir: Path = AUDIO_DIR,
+) -> None:
+
+    if not audio_dir.exists():
+        return
+
+    cutoff_timestamp = cutoff.timestamp()
+
+    for file_path in audio_dir.glob("*.wav"):
+        try:
+            modified_at = file_path.stat().st_mtime
+
+        except FileNotFoundError:
+            continue
+
+        if modified_at < cutoff_timestamp:
+            file_path.unlink(missing_ok=True)
+
+
+def generate_audio_file(
+    text: str,
+    language_code: str,
+    voice: str,
+    output_id: str | None = None,
+    progress_callback: Callable[[int], bool] | None = None,
+) -> str:
+
+    return generate_segmented_audio_file(
+        segments=[(text, voice)],
+        language_code=language_code,
+        output_id=output_id,
+        progress_callback=progress_callback,
+        pause_seconds=0,
+    )
+
+
+def generate_segmented_audio_file(
+    segments: list[tuple[str, str]],
+    language_code: str,
+    output_id: str | None = None,
+    progress_callback: Callable[[int], bool] | None = None,
+    pause_seconds: float = PODCAST_SEGMENT_PAUSE_SECONDS,
+) -> str:
+
+    AUDIO_DIR.mkdir(exist_ok=True)
+
+    resolved_output_id = output_id or uuid4().hex
+
+    file_name = build_audio_file_name(resolved_output_id)
+
+    output_path = AUDIO_DIR / file_name
+
+    temporary_path = AUDIO_DIR / f".{resolved_output_id}.tmp"
+
     pipeline = KPipeline(lang_code=language_code)
-    # Starts audio generation with the selected voice.
-    generator = pipeline(text, voice=VOICE)
-    # Pulls just the audio arrays out of the Kokoro generator output.
-    chunks = [audio for _, _, audio in generator]
 
-    # Detects the rare case where Kokoro returns no audio chunks at all.
-    if not chunks:
-        # Fails loudly so the API can return an error instead of an empty file.
-        raise RuntimeError("Kokoro did not generate audio")
+    total_characters = sum(len(text) for text, _voice in segments)
 
-    # Concatenates all generated audio chunks into one continuous waveform.
-    full_audio = np.concatenate(chunks, axis=0)
-    # Writes the waveform to disk as the stable WAV output file.
-    sf.write(AUDIO_DIR / AUDIO_FILE_NAME, full_audio, AUDIO_SAMPLE_RATE)
+    if not segments or total_characters == 0:
+        raise ValueError("At least one non-empty audio segment is required")
 
-    # Returns only the file name so the API layer can build the public URL.
-    return AUDIO_FILE_NAME
+    processed_characters = 0
+
+    last_reported_progress = 0
+
+    generated_chunk = False
+
+    try:
+        with sf.SoundFile(
+            temporary_path,
+            mode="w",
+            samplerate=AUDIO_SAMPLE_RATE,
+            channels=1,
+            format="WAV",
+        ) as output_file:
+            for segment_index, (text, voice) in enumerate(segments):
+                generator = pipeline(text, voice=voice)
+
+                for generated_text, _phonemes, chunk_audio in generator:
+                    if isinstance(generated_text, str):
+                        processed_characters += len(generated_text)
+
+                    progress = min(
+                        99,
+                        max(
+                            1,
+                            round(
+                                processed_characters / max(total_characters, 1) * 100
+                            ),
+                        ),
+                    )
+
+                    if (
+                        progress_callback is not None
+                        and progress > last_reported_progress
+                    ):
+                        if not progress_callback(progress):
+                            raise AudioGenerationCancelled
+
+                        last_reported_progress = progress
+
+                    output_file.write(np.asarray(chunk_audio))
+
+                    generated_chunk = True
+
+                if segment_index < len(segments) - 1 and pause_seconds > 0:
+                    pause_sample_count = round(AUDIO_SAMPLE_RATE * pause_seconds)
+
+                    output_file.write(np.zeros(pause_sample_count, dtype=np.float32))
+
+        if not generated_chunk:
+            raise RuntimeError("Kokoro did not generate audio")
+
+        temporary_path.replace(output_path)
+
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+    return file_name

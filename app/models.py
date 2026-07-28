@@ -1,76 +1,260 @@
-# Imports Literal so job status values stay restricted to known strings.
+import os
+
+from datetime import datetime
 from typing import Literal
 
-# Imports Pydantic helpers for request validation and response serialization.
-from pydantic import BaseModel, Field, field_validator
+
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-# Defines every lifecycle state an asynchronous audio job can report.
-AudioJobStatus = Literal["queued", "summarizing", "generating", "done", "failed"]
+DEFAULT_AUDIO_MAX_TEXT_CHARACTERS = 50_000
+
+MAX_AUDIO_MAX_TEXT_CHARACTERS = 1_000_000
 
 
-# Describes the JSON returned by the health-check endpoint.
+def get_audio_max_text_characters() -> int:
+
+    try:
+        configured_limit = int(
+            os.getenv(
+                "AUDIO_MAX_TEXT_CHARACTERS",
+                str(DEFAULT_AUDIO_MAX_TEXT_CHARACTERS),
+            )
+        )
+
+    except ValueError:
+        configured_limit = DEFAULT_AUDIO_MAX_TEXT_CHARACTERS
+
+    return min(max(configured_limit, 1), MAX_AUDIO_MAX_TEXT_CHARACTERS)
+
+
+AUDIO_MAX_TEXT_CHARACTERS = get_audio_max_text_characters()
+
+
+AudioJobStatus = Literal[
+    "queued",
+    "summarizing",
+    "generating",
+    "cancel_requested",
+    "cancelled",
+    "done",
+    "failed",
+]
+
+
+PodcastFormat = Literal["narration", "interview", "explainer"]
+
+PodcastDuration = Literal["short", "medium", "long"]
+
+PodcastSpeaker = Literal["host", "guest"]
+
+PodcastWorkflowStatus = Literal["awaiting_review", "approved", "queued"]
+
+
 class HealthResponse(BaseModel):
-    # Stores the service status string, such as "ok".
     status: str
 
 
-# Describes one language option returned to the frontend.
-class LanguageOption(BaseModel):
-    # Stores the human-readable language label shown in the dropdown.
+class AppConfigResponse(BaseModel):
+    max_text_characters: int
+
+
+class VoiceOption(BaseModel):
+    id: str
+
     label: str
-    # Stores the Kokoro language code submitted back to the API.
+
+
+class LanguageOption(BaseModel):
+    label: str
+
     code: str
 
+    default_voice: str
 
-# Describes and validates the JSON body sent to the audio endpoint.
-class AudioRequest(BaseModel):
-    # Stores the text to summarize or convert to speech, requiring at least one character.
-    text: str = Field(min_length=1)
-    # Stores the requested Kokoro language code, requiring at least one character.
-    language_code: str = Field(min_length=1)
-    # Controls whether the API summarizes the text before generating speech.
-    summarize: bool = False
+    voices: list[VoiceOption]
 
-    # Registers custom validation for the text field.
+
+class PodcastScriptSegment(BaseModel):
+    speaker: PodcastSpeaker
+
+    text: str = Field(min_length=1, max_length=10_000)
+
     @field_validator("text")
-    # Allows Pydantic to call this validator on the model class.
     @classmethod
-    # Rejects values that are only whitespace after trimming.
-    def text_must_not_be_blank(cls, value: str) -> str:
-        # Removes surrounding whitespace from the submitted text.
+    def trim_text(cls, value: str) -> str:
+
         stripped_value = value.strip()
-        # Checks whether anything remains after whitespace is removed.
+
         if not stripped_value:
-            # Reports a validation error that FastAPI converts into a 422 response.
-            raise ValueError("Text is required")
-        # Returns the trimmed text so downstream code receives clean input.
+            raise ValueError("Podcast segment text is required")
+
         return stripped_value
 
 
-# Describes the JSON returned after audio generation succeeds.
+class PodcastScriptRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=AUDIO_MAX_TEXT_CHARACTERS)
+
+    format: PodcastFormat
+
+    duration: PodcastDuration
+
+    @field_validator("text")
+    @classmethod
+    def trim_source_text(cls, value: str) -> str:
+
+        stripped_value = value.strip()
+
+        if not stripped_value:
+            raise ValueError("Text is required")
+
+        return stripped_value
+
+
+class PodcastScriptResponse(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+
+    segments: list[PodcastScriptSegment] = Field(min_length=1, max_length=24)
+
+    @field_validator("title")
+    @classmethod
+    def trim_title(cls, value: str) -> str:
+
+        stripped_value = value.strip()
+
+        if not stripped_value:
+            raise ValueError("Podcast title is required")
+
+        return stripped_value
+
+
+class PodcastWorkflowResponse(BaseModel):
+    workflow_id: str
+
+    status: PodcastWorkflowStatus
+
+    script: PodcastScriptResponse
+
+    facts: list[str]
+
+    issues: list[str]
+
+    revision_count: int = Field(ge=0, le=2)
+
+    audio_job_id: str | None = None
+
+
+class PodcastWorkflowApprovalRequest(BaseModel):
+    script: PodcastScriptResponse
+
+    language_code: str = Field(min_length=1)
+
+    host_voice: str = Field(min_length=1)
+
+    guest_voice: str = Field(min_length=1)
+
+    @field_validator("language_code", "host_voice", "guest_voice")
+    @classmethod
+    def trim_audio_identifier(cls, value: str) -> str:
+
+        return value.strip()
+
+
+class AudioSegment(PodcastScriptSegment):
+    voice: str = Field(min_length=1)
+
+    @field_validator("voice")
+    @classmethod
+    def trim_segment_voice(cls, value: str) -> str:
+
+        return value.strip()
+
+
+class AudioRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=AUDIO_MAX_TEXT_CHARACTERS)
+
+    language_code: str = Field(min_length=1)
+
+    voice: str | None = Field(default=None, min_length=1)
+
+    summarize: bool = False
+
+    segments: list[AudioSegment] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=24,
+    )
+
+    @field_validator("text")
+    @classmethod
+    def text_must_not_be_blank(cls, value: str) -> str:
+
+        stripped_value = value.strip()
+
+        if not stripped_value:
+            raise ValueError("Text is required")
+
+        return stripped_value
+
+    @field_validator("voice")
+    @classmethod
+    def trim_voice(cls, value: str | None) -> str | None:
+
+        if value is None:
+            return None
+
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_segments(self) -> "AudioRequest":
+
+        if self.segments is None:
+            return self
+
+        if self.summarize:
+            raise ValueError("Podcast segments cannot be summarized")
+
+        total_characters = sum(len(segment.text) for segment in self.segments)
+
+        if total_characters > AUDIO_MAX_TEXT_CHARACTERS:
+            raise ValueError("Podcast script is too long")
+
+        return self
+
+
 class AudioResponse(BaseModel):
-    # Stores the URL path where the generated audio file can be downloaded or played.
     audio_url: str
-    # Stores the generated summary, or None when summarization was not requested.
+
     summarized_text: str | None = None
 
 
-# Describes the JSON returned immediately after an async audio job is created.
 class AudioJobCreateResponse(BaseModel):
-    # Stores the unique ID the frontend uses to subscribe to job progress events.
     job_id: str
 
 
-# Describes one async audio job status payload.
 class AudioJobStatusResponse(BaseModel):
-    # Stores the unique job ID this status belongs to.
     job_id: str
-    # Stores the current lifecycle state for the job.
+
     status: AudioJobStatus
-    # Stores the generated audio URL once the job completes.
+
+    queue_position: int | None = None
+
+    progress: int = Field(ge=0, le=100)
+
+    language_code: str
+
+    voice: str
+
+    summarize: bool
+
+    text_preview: str
+
+    created_at: datetime
+
+    updated_at: datetime
+
     audio_url: str | None = None
-    # Stores the optional summary once the job completes.
+
     summarized_text: str | None = None
-    # Stores a user-visible error message when the job fails.
+
     error: str | None = None

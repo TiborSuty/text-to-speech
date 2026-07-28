@@ -1,48 +1,77 @@
-// Describes one language option returned from the backend.
+export type VoiceOption = {
+    id: string;
+    label: string;
+};
 export type LanguageOption = {
-  // Stores the label displayed to the user in the language selector.
-  label: string;
-  // Stores the Kokoro language code submitted to the API.
-  code: string;
+    label: string;
+    code: string;
+    default_voice: string;
+    voices: VoiceOption[];
 };
-
-// Describes the request body sent when the user generates audio.
+export type AppConfig = {
+    max_text_characters: number;
+};
+export type PodcastFormat = 'narration' | 'interview' | 'explainer';
+export type PodcastDuration = 'short' | 'medium' | 'long';
+export type PodcastSpeaker = 'host' | 'guest';
+export type PodcastScriptSegment = {
+    speaker: PodcastSpeaker;
+    text: string;
+};
+export type PodcastScriptRequest = {
+    text: string;
+    format: PodcastFormat;
+    duration: PodcastDuration;
+};
+export type PodcastScript = {
+    title: string;
+    segments: PodcastScriptSegment[];
+};
+export type PodcastWorkflow = {
+    workflow_id: string;
+    status: 'awaiting_review' | 'approved' | 'queued';
+    script: PodcastScript;
+    facts: string[];
+    issues: string[];
+    revision_count: number;
+    audio_job_id: string | null;
+};
+export type PodcastWorkflowApproval = {
+    script: PodcastScript;
+    language_code: string;
+    host_voice: string;
+    guest_voice: string;
+};
+export type AudioSegment = PodcastScriptSegment & {
+    voice: string;
+};
 export type AudioRequest = {
-  // Stores the text that should be summarized or converted to speech.
-  text: string;
-  // Stores the selected language code expected by the backend.
-  language_code: string;
-  // Stores whether the backend should summarize before generating audio.
-  summarize: boolean;
+    text: string;
+    language_code: string;
+    voice: string;
+    summarize: boolean;
+    segments?: AudioSegment[];
 };
-
-// Describes the response returned after audio generation succeeds.
 export type AudioResponse = {
-  // Stores the URL path or absolute URL for the generated audio file.
-  audio_url: string;
-  // Stores the optional generated summary returned by the backend.
-  summarized_text: string | null;
+    audio_url: string;
+    summarized_text: string | null;
 };
-
-// Lists every status an asynchronous audio job can report.
-export type AudioJobStatus = 'queued' | 'summarizing' | 'generating' | 'done' | 'failed';
-
-// Describes the response returned immediately after creating an audio job.
+export type AudioJobStatus = 'queued' | 'summarizing' | 'generating' | 'cancel_requested' | 'cancelled' | 'done' | 'failed';
 export type AudioJobCreateResponse = {
-  // Stores the unique ID used to subscribe to job events.
-  job_id: string;
+    job_id: string;
 };
-
-// Describes one audio job status payload streamed over SSE.
 export type AudioJobStatusResponse = {
-  // Stores the unique ID this status belongs to.
-  job_id: string;
-  // Stores the current lifecycle status for the job.
-  status: AudioJobStatus;
-  // Stores the generated audio URL once the job completes.
-  audio_url: string | null;
-  // Stores optional summary text once the job completes.
-  summarized_text: string | null;
-  // Stores a user-visible failure message when the job fails.
-  error: string | null;
+    job_id: string;
+    status: AudioJobStatus;
+    queue_position: number | null;
+    progress: number;
+    language_code: string;
+    voice: string;
+    summarize: boolean;
+    text_preview: string;
+    created_at: string;
+    updated_at: string;
+    audio_url: string | null;
+    summarized_text: string | null;
+    error: string | null;
 };

@@ -1,329 +1,881 @@
-# Imports FastAPI's synchronous test client for endpoint tests.
+import time
+from threading import Event
+
 from fastapi.testclient import TestClient
 
-# Imports the FastAPI app instance under test.
-from app.main import app
-# Imports the summarization exception used to test local model failures.
-from app.text import SummarizationError
 
-# Creates a reusable client that sends requests to the in-process app.
+from app.audio import AUDIO_DIR
+
+from app.main import app
+
+from app.models import AUDIO_MAX_TEXT_CHARACTERS
+
+from app.models import (
+    AudioJobCreateResponse,
+    PodcastScriptResponse,
+    PodcastWorkflowApprovalRequest,
+    PodcastWorkflowResponse,
+)
+from app.text import PodcastScriptError, SummarizationError
+
+
 client = TestClient(app)
 
 
-# Verifies that the health endpoint reports the API as running.
+def wait_for_job_status(
+    job_id: str,
+    expected_statuses: set[str] | None = None,
+    timeout: float = 3,
+) -> dict[str, object]:
+
+    statuses = expected_statuses or {"cancelled", "done", "failed"}
+
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/audio-jobs/{job_id}")
+
+        job = response.json()
+
+        if job["status"] in statuses:
+            return job
+
+        time.sleep(0.01)
+
+    raise AssertionError(
+        f"Job {job_id} did not reach {sorted(statuses)} before timeout"
+    )
+
+
 def test_health_endpoint_returns_ok():
-    # Sends a GET request to the health-check endpoint.
+
     response = client.get("/api/health")
 
-    # Confirms the endpoint returns a successful HTTP status.
     assert response.status_code == 200
-    # Confirms the endpoint returns the expected health payload.
+
     assert response.json() == {"status": "ok"}
 
 
-# Verifies that the languages endpoint returns supported language data.
+def test_config_endpoint_returns_text_limit():
+
+    response = client.get("/api/config")
+
+    assert response.status_code == 200
+    assert response.json() == {"max_text_characters": AUDIO_MAX_TEXT_CHARACTERS}
+
+
+def test_audio_job_rejects_text_over_configured_limit():
+
+    response = client.post(
+        "/api/audio-jobs",
+        json={
+            "text": "x" * (AUDIO_MAX_TEXT_CHARACTERS + 1),
+            "language_code": "a",
+            "summarize": False,
+        },
+    )
+
+    assert response.status_code == 422
+    assert "at most" in response.json()["detail"][0]["msg"]
+
+
 def test_languages_endpoint_returns_supported_languages():
-    # Sends a GET request to the language-list endpoint.
+
     response = client.get("/api/languages")
 
-    # Confirms the endpoint returns a successful HTTP status.
     assert response.status_code == 200
-    # Parses the JSON response into a Python value for assertions.
+
     languages = response.json()
-    # Confirms the first language uses the default American English code.
+
     assert languages[0]["code"] == "a"
-    # Confirms the first language label names American English.
+
     assert "American English" in languages[0]["label"]
 
+    assert languages[0]["default_voice"] == "af_heart"
 
-# Verifies that blank input text is rejected before audio generation.
-def test_create_audio_rejects_blank_text():
-    # Sends a POST request with whitespace-only text.
+    assert {"id": "af_heart", "label": "Heart (Female)"} in languages[0]["voices"]
+
+
+def test_generate_podcast_script_endpoint(monkeypatch):
+
+    def fake_create_podcast_script(request):
+
+        assert request.text == "SQLite runs inside your application."
+        assert request.format == "interview"
+        assert request.duration == "short"
+
+        return PodcastScriptResponse(
+            title="Inside SQLite",
+            segments=[
+                {"speaker": "host", "text": "Where does SQLite run?"},
+                {
+                    "speaker": "guest",
+                    "text": "It runs inside the application process.",
+                },
+            ],
+        )
+
+    monkeypatch.setattr(
+        "app.main.create_podcast_script",
+        fake_create_podcast_script,
+    )
+
     response = client.post(
-        # Targets the audio-generation endpoint.
+        "/api/podcast-scripts",
+        json={
+            "text": "SQLite runs inside your application.",
+            "format": "interview",
+            "duration": "short",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "title": "Inside SQLite",
+        "segments": [
+            {"speaker": "host", "text": "Where does SQLite run?"},
+            {
+                "speaker": "guest",
+                "text": "It runs inside the application process.",
+            },
+        ],
+    }
+
+
+def test_generate_podcast_script_reports_ollama_unavailable(monkeypatch):
+
+    def fake_create_podcast_script(_request):
+        raise PodcastScriptError("Podcast Director is unavailable")
+
+    monkeypatch.setattr(
+        "app.main.create_podcast_script",
+        fake_create_podcast_script,
+    )
+
+    response = client.post(
+        "/api/podcast-scripts",
+        json={
+            "text": "Source material",
+            "format": "explainer",
+            "duration": "medium",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Podcast Director is unavailable"
+
+
+def test_create_podcast_workflow_endpoint(monkeypatch):
+
+    def fake_start_podcast_workflow(request):
+
+        assert request.text == "SQLite is embedded."
+        assert request.format == "narration"
+        assert request.duration == "short"
+
+        return PodcastWorkflowResponse(
+            workflow_id="workflow123",
+            status="awaiting_review",
+            script={
+                "title": "Embedded SQLite",
+                "segments": [{"speaker": "host", "text": "SQLite is embedded."}],
+            },
+            facts=["SQLite is embedded."],
+            issues=[],
+            revision_count=0,
+        )
+
+    monkeypatch.setattr(
+        "app.main.start_podcast_workflow",
+        fake_start_podcast_workflow,
+    )
+
+    response = client.post(
+        "/api/podcast-workflows",
+        json={
+            "text": "SQLite is embedded.",
+            "format": "narration",
+            "duration": "short",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["workflow_id"] == "workflow123"
+    assert response.json()["status"] == "awaiting_review"
+    assert response.json()["facts"] == ["SQLite is embedded."]
+    assert response.json()["audio_job_id"] is None
+
+
+def test_approve_podcast_workflow_queues_idempotent_audio(monkeypatch):
+
+    persisted_approval = PodcastWorkflowApprovalRequest(
+        script={
+            "title": "Inside SQLite",
+            "segments": [
+                {"speaker": "host", "text": "Where does SQLite run?"},
+                {"speaker": "guest", "text": "Inside the application."},
+            ],
+        },
+        language_code="a",
+        host_voice="af_heart",
+        guest_voice="af_bella",
+    )
+
+    captured = {}
+
+    def fake_approve(workflow_id, approval):
+        assert workflow_id == "workflow123"
+        assert approval == persisted_approval
+
+    def fake_get_approval(workflow_id):
+        assert workflow_id == "workflow123"
+        return persisted_approval
+
+    def fake_enqueue(request, *, job_id=None):
+        captured["request"] = request
+        captured["job_id"] = job_id
+        return AudioJobCreateResponse(job_id=job_id)
+
+    def fake_link(workflow_id, audio_job_id):
+        captured["link"] = (workflow_id, audio_job_id)
+
+    monkeypatch.setattr("app.main.approve_podcast_workflow", fake_approve)
+    monkeypatch.setattr("app.main.get_podcast_workflow_approval", fake_get_approval)
+    monkeypatch.setattr("app.main.enqueue_audio_job", fake_enqueue)
+    monkeypatch.setattr("app.main.link_podcast_audio_job", fake_link)
+
+    response = client.post(
+        "/api/podcast-workflows/workflow123/approve",
+        json=persisted_approval.model_dump(mode="json"),
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {"job_id": "workflow123"}
+    assert captured["job_id"] == "workflow123"
+    assert captured["link"] == ("workflow123", "workflow123")
+
+    request = captured["request"]
+    assert [segment.voice for segment in request.segments] == [
+        "af_heart",
+        "af_bella",
+    ]
+    assert request.summarize is False
+
+
+def test_audio_job_generates_multi_speaker_script(monkeypatch):
+
+    captured_segments: list[tuple[str, str]] = []
+
+    def fake_generate_segmented_audio_file(
+        segments,
+        language_code,
+        output_id,
+        progress_callback=None,
+    ):
+
+        captured_segments.extend(segments)
+        assert language_code == "a"
+
+        if progress_callback is not None:
+            assert progress_callback(50) is True
+
+        (AUDIO_DIR / f"{output_id}.wav").write_bytes(b"podcast-wave-data")
+        return f"{output_id}.wav"
+
+    monkeypatch.setattr(
+        "app.main.generate_segmented_audio_file",
+        fake_generate_segmented_audio_file,
+    )
+
+    create_response = client.post(
+        "/api/audio-jobs",
+        json={
+            "text": "Welcome\nThank you",
+            "language_code": "a",
+            "voice": "af_heart",
+            "summarize": False,
+            "segments": [
+                {
+                    "speaker": "host",
+                    "text": "Welcome",
+                    "voice": "af_heart",
+                },
+                {
+                    "speaker": "guest",
+                    "text": "Thank you",
+                    "voice": "am_adam",
+                },
+            ],
+        },
+    )
+
+    job = wait_for_job_status(create_response.json()["job_id"])
+
+    assert job["status"] == "done"
+    assert captured_segments == [
+        ("Welcome", "af_heart"),
+        ("Thank you", "am_adam"),
+    ]
+
+
+def test_create_audio_rejects_blank_text():
+
+    response = client.post(
         "/api/audio",
-        # Provides a request body that should fail text validation.
         json={"text": "   ", "language_code": "a", "summarize": False},
     )
 
-    # Confirms FastAPI/Pydantic rejects the invalid request.
     assert response.status_code == 422
 
 
-# Verifies that unsupported language codes are rejected.
 def test_create_audio_rejects_unsupported_language_code():
-    # Sends a POST request with a language code outside the supported set.
+
     response = client.post(
-        # Targets the audio-generation endpoint.
         "/api/audio",
-        # Provides a request body with an invalid language code.
         json={"text": "Hello", "language_code": "xx", "summarize": False},
     )
 
-    # Confirms the endpoint rejects the unsupported language.
     assert response.status_code == 422
-    # Confirms the endpoint returns the expected error detail.
+
     assert response.json()["detail"] == "Unsupported language code"
 
 
-# Verifies that successful audio generation returns the generated audio URL.
+def test_create_audio_rejects_voice_language_mismatch():
+
+    response = client.post(
+        "/api/audio",
+        json={
+            "text": "Hello",
+            "language_code": "a",
+            "voice": "bf_emma",
+            "summarize": False,
+        },
+    )
+
+    assert response.status_code == 422
+
+    assert response.json()["detail"] == "Unsupported voice for selected language"
+
+
 def test_create_audio_returns_audio_url(monkeypatch):
-    # Defines a fake audio generator so the test does not run Kokoro.
-    def fake_generate_audio_file(text: str, language_code: str) -> str:
-        # Confirms the endpoint passes through the submitted text.
+
+    def fake_generate_audio_file(text: str, language_code: str, voice: str) -> str:
+
         assert text == "Hello world"
-        # Confirms the endpoint passes through the selected language code.
+
         assert language_code == "a"
-        # Returns the file name that the endpoint should expose.
+
+        assert voice == "af_heart"
+
+        (AUDIO_DIR / "audio.wav").write_bytes(b"test-wave-data")
+
         return "audio.wav"
 
-    # Replaces the real audio generator with the fake test implementation.
     monkeypatch.setattr("app.main.generate_audio_file", fake_generate_audio_file)
 
-    # Sends a valid audio-generation request without summarization.
     response = client.post(
-        # Targets the audio-generation endpoint.
         "/api/audio",
-        # Provides the request body expected to succeed.
         json={"text": "Hello world", "language_code": "a", "summarize": False},
     )
 
-    # Confirms the endpoint returns a successful HTTP status.
     assert response.status_code == 200
-    # Confirms the endpoint returns the generated audio URL and no summary.
+
     assert response.json() == {
-        # Confirms the API prefixes the file name with the mounted audio path.
-        "audio_url": "/audios/audio.wav",
-        # Confirms no summary is returned when summarization is disabled.
+        "audio_url": "/api/audio-files/audio.wav",
         "summarized_text": None,
     }
 
 
-# Verifies that summarized text is used for audio when requested.
 def test_create_audio_returns_summary_when_requested(monkeypatch):
-    # Defines a fake summarizer so the test does not call the language model.
+
     def fake_summarize_text(text: str) -> str:
-        # Confirms the endpoint passes the original submitted text to the summarizer.
+
         assert text == "Long text"
-        # Returns the summary that should be sent to audio generation.
+
         return "Short summary."
 
-    # Defines a fake audio generator so the test does not run Kokoro.
-    def fake_generate_audio_file(text: str, language_code: str) -> str:
-        # Confirms audio generation receives the summarized text.
+    def fake_generate_audio_file(text: str, language_code: str, voice: str) -> str:
+
         assert text == "Short summary."
-        # Confirms the selected language code is preserved.
+
         assert language_code == "a"
-        # Returns the file name that the endpoint should expose.
+
+        assert voice == "af_heart"
+
+        (AUDIO_DIR / "audio.wav").write_bytes(b"test-wave-data")
+
         return "audio.wav"
 
-    # Replaces the real summarizer with the fake test implementation.
     monkeypatch.setattr("app.main.summarize_text", fake_summarize_text)
-    # Replaces the real audio generator with the fake test implementation.
+
     monkeypatch.setattr("app.main.generate_audio_file", fake_generate_audio_file)
 
-    # Sends a valid audio-generation request with summarization enabled.
     response = client.post(
-        # Targets the audio-generation endpoint.
         "/api/audio",
-        # Provides the request body expected to summarize before audio generation.
         json={"text": "Long text", "language_code": "a", "summarize": True},
     )
 
-    # Confirms the endpoint returns a successful HTTP status.
     assert response.status_code == 200
-    # Confirms the endpoint returns both the audio URL and generated summary.
+
     assert response.json() == {
-        # Confirms the API prefixes the file name with the mounted audio path.
-        "audio_url": "/audios/audio.wav",
-        # Confirms the summary is included in the response.
+        "audio_url": "/api/audio-files/audio.wav",
         "summarized_text": "Short summary.",
     }
 
 
-# Verifies that local summarizer failures return an actionable API error.
 def test_create_audio_reports_summarizer_unavailable(monkeypatch):
-    # Defines the message the backend should return when Ollama is unavailable.
-    error_message = (
-        # Explains that the local Ollama summarization dependency needs setup.
-        "Could not summarize text. Make sure Ollama is running and deepseek-r1:8b is installed."
-    )
 
-    # Defines a fake summarizer that simulates an Ollama or model failure.
+    error_message = "Could not summarize text. Make sure Ollama is running and deepseek-r1:8b is installed."
+
     def fake_summarize_text(text: str) -> str:
-        # Confirms the endpoint still passes the original text into summarization.
+
         assert text == "Long text"
-        # Raises the app-specific summarization failure.
+
         raise SummarizationError(error_message)
 
-    # Replaces the real summarizer with the failing test implementation.
     monkeypatch.setattr("app.main.summarize_text", fake_summarize_text)
 
-    # Sends a request that requires summarization before audio generation.
     response = client.post(
-        # Targets the audio-generation endpoint.
         "/api/audio",
-        # Provides a valid body with summarization enabled.
         json={"text": "Long text", "language_code": "a", "summarize": True},
     )
 
-    # Confirms the endpoint reports an unavailable local dependency.
     assert response.status_code == 503
-    # Confirms the response includes the actionable Ollama setup message.
+
     assert response.json()["detail"] == error_message
 
 
-# Verifies that the async audio job endpoint returns a job ID.
 def test_create_audio_job_returns_job_id(monkeypatch):
-    # Defines a fake audio generator so the background task does not run Kokoro.
-    def fake_generate_audio_file(text: str, language_code: str) -> str:
-        # Confirms the async endpoint passes through the submitted text.
-        assert text == "Hello world"
-        # Confirms the async endpoint passes through the selected language code.
-        assert language_code == "a"
-        # Returns the file name that the job should expose.
-        return "audio.wav"
 
-    # Replaces the real audio generator with the fake test implementation.
+    def fake_generate_audio_file(
+        text: str,
+        language_code: str,
+        voice: str,
+        output_id: str,
+        progress_callback=None,
+    ) -> str:
+
+        assert text == "Hello world"
+
+        assert language_code == "a"
+
+        assert voice == "af_bella"
+
+        (AUDIO_DIR / f"{output_id}.wav").write_bytes(b"test-wave-data")
+
+        return f"{output_id}.wav"
+
     monkeypatch.setattr("app.main.generate_audio_file", fake_generate_audio_file)
 
-    # Sends a valid async audio-generation request.
     response = client.post(
-        # Targets the async audio-job creation endpoint.
         "/api/audio-jobs",
-        # Provides the request body expected to succeed.
-        json={"text": "Hello world", "language_code": "a", "summarize": False},
+        json={
+            "text": "Hello world",
+            "language_code": "a",
+            "voice": "af_bella",
+            "summarize": False,
+        },
     )
 
-    # Confirms the endpoint accepted the job instead of blocking for a sync response.
     assert response.status_code == 202
-    # Extracts the generated job ID from the response body.
+
     job_id = response.json()["job_id"]
-    # Confirms the job ID is a non-empty string.
+
     assert isinstance(job_id, str)
-    # Confirms the job ID has content.
+
     assert job_id
 
+    assert wait_for_job_status(job_id)["status"] == "done"
 
-# Verifies that async audio job status reports completion data.
+
 def test_audio_job_status_returns_completed_job(monkeypatch):
-    # Defines a fake audio generator so the background task does not run Kokoro.
-    def fake_generate_audio_file(text: str, language_code: str) -> str:
-        # Confirms the job receives the original submitted text.
-        assert text == "Hello world"
-        # Confirms the job receives the selected language code.
-        assert language_code == "a"
-        # Returns the generated audio file name.
-        return "audio.wav"
 
-    # Replaces the real audio generator with the fake test implementation.
+    def fake_generate_audio_file(
+        text: str,
+        language_code: str,
+        voice: str,
+        output_id: str,
+        progress_callback=None,
+    ) -> str:
+
+        assert text == "Hello world"
+
+        assert language_code == "a"
+
+        assert voice == "af_heart"
+
+        (AUDIO_DIR / f"{output_id}.wav").write_bytes(b"test-wave-data")
+
+        return f"{output_id}.wav"
+
     monkeypatch.setattr("app.main.generate_audio_file", fake_generate_audio_file)
 
-    # Creates an async audio job.
     create_response = client.post(
-        # Targets the async audio-job creation endpoint.
         "/api/audio-jobs",
-        # Provides a request body that should complete successfully.
         json={"text": "Hello world", "language_code": "a", "summarize": False},
     )
-    # Extracts the created job ID.
+
     job_id = create_response.json()["job_id"]
 
-    # Requests the current job status.
-    status_response = client.get(f"/api/audio-jobs/{job_id}")
+    job = wait_for_job_status(job_id, {"done"})
 
-    # Confirms the status endpoint succeeds.
-    assert status_response.status_code == 200
-    # Confirms the completed job payload contains the final audio URL.
-    assert status_response.json() == {
-        # Confirms the response belongs to the created job.
-        "job_id": job_id,
-        # Confirms the job reached the done state.
-        "status": "done",
-        # Confirms the audio URL matches the generated file.
-        "audio_url": "/audios/audio.wav",
-        # Confirms no summary is returned when summarization is disabled.
-        "summarized_text": None,
-        # Confirms no error is returned for a successful job.
-        "error": None,
-    }
+    assert job["job_id"] == job_id
+
+    assert job["status"] == "done"
+    assert job["progress"] == 100
+
+    assert job["audio_url"] == f"/api/audio-files/{job_id}.wav"
+
+    assert job["language_code"] == "a"
+    assert job["voice"] == "af_heart"
+    assert job["summarize"] is False
+    assert job["text_preview"] == "Hello world"
+
+    assert job["created_at"]
+    assert job["updated_at"]
+
+    assert job["summarized_text"] is None
+    assert job["error"] is None
 
 
-# Verifies that async audio jobs can stream a terminal Server-Sent Event.
+def test_audio_job_reports_incremental_generation_progress(monkeypatch):
+
+    progress_reported = Event()
+    release_generation = Event()
+
+    def fake_generate_audio_file(
+        text: str,
+        language_code: str,
+        voice: str,
+        output_id: str,
+        progress_callback=None,
+    ) -> str:
+        assert progress_callback is not None
+        assert progress_callback(42) is True
+        progress_reported.set()
+        assert release_generation.wait(timeout=3)
+        file_name = f"{output_id}.wav"
+        (AUDIO_DIR / file_name).write_bytes(b"test-wave-data")
+        return file_name
+
+    monkeypatch.setattr("app.main.generate_audio_file", fake_generate_audio_file)
+    create_response = client.post(
+        "/api/audio-jobs",
+        json={"text": "Track this", "language_code": "a", "summarize": False},
+    )
+    job_id = create_response.json()["job_id"]
+
+    assert progress_reported.wait(timeout=3)
+    active_job = client.get(f"/api/audio-jobs/{job_id}").json()
+    assert active_job["status"] == "generating"
+    assert active_job["progress"] == 42
+
+    release_generation.set()
+    completed_job = wait_for_job_status(job_id, {"done"})
+    assert completed_job["progress"] == 100
+
+
 def test_audio_job_events_stream_done_event(monkeypatch):
-    # Defines a fake audio generator so the background task does not run Kokoro.
-    def fake_generate_audio_file(text: str, language_code: str) -> str:
-        # Confirms the job receives the original submitted text.
-        assert text == "Hello world"
-        # Confirms the job receives the selected language code.
-        assert language_code == "a"
-        # Returns the generated audio file name.
-        return "audio.wav"
 
-    # Replaces the real audio generator with the fake test implementation.
+    def fake_generate_audio_file(
+        text: str,
+        language_code: str,
+        voice: str,
+        output_id: str,
+        progress_callback=None,
+    ) -> str:
+
+        assert text == "Hello world"
+
+        assert language_code == "a"
+
+        assert voice == "af_heart"
+
+        (AUDIO_DIR / f"{output_id}.wav").write_bytes(b"test-wave-data")
+
+        return f"{output_id}.wav"
+
     monkeypatch.setattr("app.main.generate_audio_file", fake_generate_audio_file)
 
-    # Creates an async audio job.
     create_response = client.post(
-        # Targets the async audio-job creation endpoint.
         "/api/audio-jobs",
-        # Provides a request body that should complete successfully.
         json={"text": "Hello world", "language_code": "a", "summarize": False},
     )
-    # Extracts the created job ID.
+
     job_id = create_response.json()["job_id"]
 
-    # Opens the SSE endpoint for the created job.
     with client.stream("GET", f"/api/audio-jobs/{job_id}/events") as stream_response:
-        # Confirms the endpoint returns a successful streaming response.
         assert stream_response.status_code == 200
-        # Reads all events until the stream closes after the done event.
+
         stream_text = "".join(stream_response.iter_text())
 
-    # Confirms the stream uses SSE data messages.
     assert "data: " in stream_text
-    # Confirms the terminal done status was streamed.
+
+    assert "retry: 1000" in stream_text
+
     assert '"status":"done"' in stream_text
-    # Confirms the generated audio URL was streamed.
-    assert '"audio_url":"/audios/audio.wav"' in stream_text
+
+    assert f'"audio_url":"/api/audio-files/{job_id}.wav"' in stream_text
+
+    assert '"text_preview":"Hello world"' in stream_text
 
 
-# Verifies that async summarizer failures stream a failed job state.
 def test_audio_job_events_stream_failed_summary_event(monkeypatch):
-    # Defines the message the backend should return when Ollama is unavailable.
-    error_message = (
-        # Explains that the local Ollama summarization dependency needs setup.
-        "Could not summarize text. Make sure Ollama is running and deepseek-r1:8b is installed."
-    )
 
-    # Defines a fake summarizer that simulates an Ollama or model failure.
+    error_message = "Could not summarize text. Make sure Ollama is running and deepseek-r1:8b is installed."
+
     def fake_summarize_text(text: str) -> str:
-        # Confirms the endpoint still passes the original text into summarization.
+
         assert text == "Long text"
-        # Raises the app-specific summarization failure.
+
         raise SummarizationError(error_message)
 
-    # Replaces the real summarizer with the failing test implementation.
     monkeypatch.setattr("app.main.summarize_text", fake_summarize_text)
 
-    # Creates an async audio job that requires summarization.
     create_response = client.post(
-        # Targets the async audio-job creation endpoint.
         "/api/audio-jobs",
-        # Provides a valid body with summarization enabled.
         json={"text": "Long text", "language_code": "a", "summarize": True},
     )
-    # Extracts the created job ID.
+
     job_id = create_response.json()["job_id"]
 
-    # Opens the SSE endpoint for the created job.
     with client.stream("GET", f"/api/audio-jobs/{job_id}/events") as stream_response:
-        # Confirms the endpoint returns a successful streaming response.
         assert stream_response.status_code == 200
-        # Reads all events until the stream closes after the failed event.
+
         stream_text = "".join(stream_response.iter_text())
 
-    # Confirms the terminal failed status was streamed.
     assert '"status":"failed"' in stream_text
-    # Confirms the actionable summarizer error was streamed.
+
     assert error_message in stream_text
+
+
+def test_audio_job_history_download_and_delete_unique_file(monkeypatch):
+
+    def fake_generate_audio_file(
+        text: str,
+        language_code: str,
+        voice: str,
+        output_id: str,
+        progress_callback=None,
+    ) -> str:
+
+        assert text == "Keep this episode"
+        assert language_code == "b"
+        assert voice == "bf_emma"
+
+        file_name = f"{output_id}.wav"
+
+        (AUDIO_DIR / file_name).write_bytes(b"test-wave-data")
+
+        return file_name
+
+    monkeypatch.setattr("app.main.generate_audio_file", fake_generate_audio_file)
+
+    create_response = client.post(
+        "/api/audio-jobs",
+        json={
+            "text": "Keep this episode",
+            "language_code": "b",
+            "voice": "bf_emma",
+            "summarize": False,
+        },
+    )
+
+    job_id = create_response.json()["job_id"]
+    object_key = f"{job_id}.wav"
+
+    wait_for_job_status(job_id, {"done"})
+
+    from app import main
+
+    assert main.audio_storage.exists(object_key)
+
+    history_response = client.get("/api/audio-jobs?limit=100")
+    history_job = next(
+        job for job in history_response.json() if job["job_id"] == job_id
+    )
+
+    assert history_job["status"] == "done"
+    assert history_job["audio_url"] == f"/api/audio-files/{job_id}.wav"
+    assert history_job["language_code"] == "b"
+    assert history_job["voice"] == "bf_emma"
+    assert history_job["text_preview"] == "Keep this episode"
+
+    playback_response = client.get(history_job["audio_url"])
+
+    assert playback_response.status_code == 200
+    assert playback_response.headers["content-type"] == "audio/wav"
+    assert playback_response.content == b"test-wave-data"
+
+    download_response = client.get(f"/api/audio-jobs/{job_id}/download")
+
+    assert download_response.status_code == 200
+    assert download_response.headers["content-type"] == "audio/wav"
+    assert (
+        f'filename="{job_id}.wav"' in download_response.headers["content-disposition"]
+    )
+    assert download_response.content == b"test-wave-data"
+
+    delete_response = client.delete(f"/api/audio-jobs/{job_id}")
+
+    assert delete_response.status_code == 204
+
+    assert main.audio_storage.exists(object_key) is False
+
+    assert client.get(f"/api/audio-jobs/{job_id}").status_code == 404
+
+
+def test_queued_audio_job_reports_position_and_cancels(monkeypatch):
+
+    first_job_started = Event()
+    release_first_job = Event()
+    generated_texts: list[str] = []
+
+    def fake_generate_audio_file(
+        text: str,
+        language_code: str,
+        voice: str,
+        output_id: str,
+        progress_callback=None,
+    ) -> str:
+
+        generated_texts.append(text)
+
+        if text == "First job":
+            first_job_started.set()
+
+            assert release_first_job.wait(timeout=3)
+
+        file_name = f"{output_id}.wav"
+        (AUDIO_DIR / file_name).write_bytes(b"test-wave-data")
+        return file_name
+
+    monkeypatch.setattr("app.main.generate_audio_file", fake_generate_audio_file)
+
+    first_response = client.post(
+        "/api/audio-jobs",
+        json={"text": "First job", "language_code": "a", "summarize": False},
+    )
+    first_job_id = first_response.json()["job_id"]
+    assert first_job_started.wait(timeout=3)
+
+    second_response = client.post(
+        "/api/audio-jobs",
+        json={"text": "Second job", "language_code": "a", "summarize": False},
+    )
+    second_job_id = second_response.json()["job_id"]
+
+    third_response = client.post(
+        "/api/audio-jobs",
+        json={"text": "Third job", "language_code": "a", "summarize": False},
+    )
+    third_job_id = third_response.json()["job_id"]
+
+    queued_job = client.get(f"/api/audio-jobs/{second_job_id}").json()
+    assert queued_job["status"] == "queued"
+    assert queued_job["queue_position"] == 1
+    assert client.get(f"/api/audio-jobs/{third_job_id}").json()["queue_position"] == 2
+
+    cancel_response = client.post(f"/api/audio-jobs/{second_job_id}/cancel")
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["status"] == "cancelled"
+    assert cancel_response.json()["queue_position"] is None
+
+    assert client.get(f"/api/audio-jobs/{third_job_id}").json()["queue_position"] == 1
+
+    assert (
+        client.post(f"/api/audio-jobs/{third_job_id}/cancel").json()["status"]
+        == "cancelled"
+    )
+
+    release_first_job.set()
+    assert wait_for_job_status(first_job_id, {"done"})["status"] == "done"
+    assert wait_for_job_status(second_job_id, {"cancelled"})["status"] == "cancelled"
+    assert wait_for_job_status(third_job_id, {"cancelled"})["status"] == "cancelled"
+
+    assert generated_texts == ["First job"]
+
+
+def test_running_audio_job_cancels_at_generation_checkpoint(monkeypatch):
+
+    generation_started = Event()
+    release_generation = Event()
+
+    def fake_generate_audio_file(
+        text: str,
+        language_code: str,
+        voice: str,
+        output_id: str,
+        progress_callback=None,
+    ) -> str:
+
+        generation_started.set()
+
+        assert release_generation.wait(timeout=3)
+
+        file_name = f"{output_id}.wav"
+        (AUDIO_DIR / file_name).write_bytes(b"cancelled-wave-data")
+        return file_name
+
+    monkeypatch.setattr("app.main.generate_audio_file", fake_generate_audio_file)
+
+    create_response = client.post(
+        "/api/audio-jobs",
+        json={"text": "Cancel running", "language_code": "a", "summarize": False},
+    )
+    job_id = create_response.json()["job_id"]
+    assert generation_started.wait(timeout=3)
+
+    cancel_response = client.post(f"/api/audio-jobs/{job_id}/cancel")
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["status"] == "cancel_requested"
+
+    release_generation.set()
+    cancelled_job = wait_for_job_status(job_id, {"cancelled"})
+
+    assert cancelled_job["audio_url"] is None
+    from app import main
+
+    assert main.audio_storage.exists(f"{job_id}.wav") is False
+
+
+def test_cancel_audio_job_returns_not_found():
+
+    response = client.post("/api/audio-jobs/missing/cancel")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Audio job not found"
+
+
+def test_audio_file_redirects_to_presigned_minio_url(monkeypatch):
+
+    from app import main
+
+    class FakeRemoteStorage:
+        def exists(self, object_key: str) -> bool:
+            assert object_key == "job123.wav"
+            return True
+
+        def presigned_get_url(
+            self,
+            object_key: str,
+            download_filename: str | None = None,
+        ) -> str:
+            assert object_key == "job123.wav"
+            assert download_filename is None
+            return "http://127.0.0.1:9000/audio/job123.wav?signed=true"
+
+        def local_path(self, object_key: str):
+            raise AssertionError("Remote storage must use the presigned URL")
+
+    monkeypatch.setattr(main, "audio_storage", FakeRemoteStorage())
+
+    response = client.get(
+        "/api/audio-files/job123.wav",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 307
+    assert response.headers["location"] == (
+        "http://127.0.0.1:9000/audio/job123.wav?signed=true"
+    )

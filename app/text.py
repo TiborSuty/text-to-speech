@@ -1,65 +1,132 @@
-# Imports regular expressions for removing model thinking blocks from output.
 import re
-# Imports os so the Ollama endpoint and model can be configured for Docker.
+
 import os
 
-# Imports LangChain's template helper for building the summarization prompt.
+
 from langchain_core.prompts import ChatPromptTemplate
-# Imports the Ollama chat model wrapper used to call the local model.
+
 from langchain_ollama import ChatOllama
 
-# Defines the prompt template sent to the summarization model.
+
+from app.models import PodcastScriptRequest, PodcastScriptResponse
+
+
 SUMMARY_TEMPLATE = """
 Summarize the following text by highlighting the key points.
 Maintain a conversational tone and keep the summary easy to follow for a general audience.
 Text: {text}
 """
 
-# Stores the Ollama HTTP base URL used by LangChain.
+
+PODCAST_SCRIPT_TEMPLATE = """
+You are an experienced podcast editor. Transform the source material into a spoken
+script that is accurate, natural, and easy to follow aloud.
+
+Format: {format}
+Length target: {duration_guide}
+
+Rules:
+- Preserve the source's important facts and do not invent facts.
+- Write the title and spoken turns in the same language as the source.
+- Write a concise, specific episode title.
+- Use only the speaker labels "host" and "guest".
+- For narration, use only "host".
+- For interview, alternate naturally between host questions and guest answers.
+- For explainer, let the host guide the topic and the guest clarify examples.
+- Keep each turn focused and conversational.
+- Do not add stage directions, markdown, sound effects, or speaker names to the text.
+
+Source:
+{text}
+"""
+
+
+PODCAST_DURATION_GUIDES = {
+    "short": "4 to 6 turns and roughly 250 to 400 spoken words",
+    "medium": "7 to 10 turns and roughly 500 to 800 spoken words",
+    "long": "11 to 16 turns and roughly 900 to 1400 spoken words",
+}
+
+
 OLLAMA_BASE_URL = (
-    # Prefers the app-specific base URL used by Docker Compose.
-    os.getenv("OLLAMA_BASE_URL")
-    # Falls back to Ollama's own host environment variable when present.
-    or os.getenv("OLLAMA_HOST")
-    # Defaults to a local Ollama process for non-Docker development.
-    or "http://127.0.0.1:11434"
+    os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434"
 )
-# Stores the default Ollama model used for summarization.
+
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "deepseek-r1:8b")
 
 
-# Defines the error raised when local Ollama summarization cannot complete.
 class SummarizationError(RuntimeError):
-    # Gives the app a specific exception type for summarization failures.
     pass
 
 
-# Removes hidden reasoning tags and surrounding whitespace from model output.
+class PodcastScriptError(RuntimeError):
+    pass
+
+
 def clean_text(text: str) -> str:
-    # Deletes any <think>...</think> block, including multi-line content.
+
     cleaned_text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    # Trims leading and trailing whitespace from the cleaned response.
+
     return cleaned_text.strip()
 
 
-# Summarizes text with a local Ollama model before sending it to text-to-speech.
 def summarize_text(text: str, model_name: str = OLLAMA_MODEL) -> str:
-    # Converts the plain template string into a reusable LangChain prompt.
+
     prompt = ChatPromptTemplate.from_template(SUMMARY_TEMPLATE)
-    # Connects the prompt to the selected Ollama chat model.
+
     chain = prompt | ChatOllama(model=model_name, base_url=OLLAMA_BASE_URL)
 
-    # Converts Ollama/model failures into an app-specific exception.
     try:
-        # Invokes the prompt/model chain with the user's text.
         summary = chain.invoke({"text": text})
-    # Handles connection errors, missing models, and other local model failures.
+
     except Exception as exc:
-        # Raises a stable message the API can safely return to the frontend.
         raise SummarizationError(
-            # Explains the most common local setup problem behind summarization failures.
             f"Could not summarize text. Make sure Ollama is running and {model_name} is installed."
-        # Preserves the original exception for backend debugging.
         ) from exc
-    # Returns the model content after removing hidden reasoning markup.
+
     return clean_text(summary.content)
+
+
+def create_podcast_script(
+    request: PodcastScriptRequest,
+    model_name: str = OLLAMA_MODEL,
+) -> PodcastScriptResponse:
+
+    prompt = PODCAST_SCRIPT_TEMPLATE.format(
+        format=request.format,
+        duration_guide=PODCAST_DURATION_GUIDES[request.duration],
+        text=request.text,
+    )
+
+    model = ChatOllama(
+        model=model_name,
+        base_url=OLLAMA_BASE_URL,
+        temperature=0.2,
+    )
+
+    structured_model = model.with_structured_output(
+        PodcastScriptResponse,
+        method="json_schema",
+    )
+
+    try:
+        generated_script = structured_model.invoke(prompt)
+
+        script = PodcastScriptResponse.model_validate(generated_script)
+
+    except Exception as exc:
+        raise PodcastScriptError(
+            f"Could not generate a podcast script. Make sure Ollama is running and {model_name} is installed."
+        ) from exc
+
+    if request.format == "narration":
+        script = script.model_copy(
+            update={
+                "segments": [
+                    segment.model_copy(update={"speaker": "host"})
+                    for segment in script.segments
+                ]
+            }
+        )
+
+    return script

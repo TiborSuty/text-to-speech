@@ -1,174 +1,259 @@
-// Imports Vitest helpers for structuring tests, assertions, and mocks.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-
-// Imports the API helpers under test.
-import {
-  buildAudioJobEventsUrl,
-  buildAudioUrl,
-  createAudioJob,
-  fetchLanguages,
-  generateAudio,
-} from './api';
-// Imports the request type used to build a typed test payload.
+import { buildAudioJobDownloadUrl, buildAudioJobEventsUrl, buildAudioUrl, approvePodcastWorkflow, cancelAudioJob, createAudioJob, deleteAudioJob, fetchAppConfig, fetchAudioJobs, fetchLanguages, fetchPodcastWorkflow, generateAudio, generatePodcastScript, startPodcastWorkflow, } from './api';
 import type { AudioRequest } from './types';
-
-// Runs cleanup after each test in this file.
 afterEach(() => {
-  // Removes mocked globals such as fetch so tests do not leak state.
-  vi.unstubAllGlobals();
+    vi.unstubAllGlobals();
 });
-
-// Groups tests for the frontend API client helpers.
 describe('api client', () => {
-  // Verifies the language-fetching helper calls the right endpoint.
-  it('fetches language options', async () => {
-    // Creates a mocked fetch response containing one language option.
-    const fetchMock = vi.fn().mockResolvedValue({
-      // Marks the mocked response as successful.
-      ok: true,
-      // Returns language JSON when the client reads the response body.
-      json: async () => [{ label: 'American English', code: 'a' }],
+    it('fetches language options', async () => {
+        const fetchMock = vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => [{ label: 'American English', code: 'a' }],
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const result = await fetchLanguages();
+        expect(fetchMock).toHaveBeenCalledWith('/api/languages', {
+            headers: { Accept: 'application/json' },
+        });
+        expect(result).toEqual([{ label: 'American English', code: 'a' }]);
     });
-    // Installs the mocked fetch function as the global fetch implementation.
-    vi.stubGlobal('fetch', fetchMock);
-
-    // Calls the production helper being tested.
-    const result = await fetchLanguages();
-
-    // Confirms the helper requested the expected language endpoint and headers.
-    expect(fetchMock).toHaveBeenCalledWith('/api/languages', {
-      // Confirms the helper asks for a JSON response.
-      headers: { Accept: 'application/json' },
+    it('fetches app configuration', async () => {
+        const fetchMock = vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => ({ max_text_characters: 50000 }),
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const result = await fetchAppConfig();
+        expect(fetchMock).toHaveBeenCalledWith('/api/config', {
+            headers: { Accept: 'application/json' },
+        });
+        expect(result).toEqual({ max_text_characters: 50000 });
     });
-    // Confirms the helper returns the parsed language array.
-    expect(result).toEqual([{ label: 'American English', code: 'a' }]);
-  });
-
-  // Verifies the audio-generation helper posts the correct request.
-  it('posts audio generation requests', async () => {
-    // Creates a mocked successful fetch response for generated audio.
-    const fetchMock = vi.fn().mockResolvedValue({
-      // Marks the mocked response as successful.
-      ok: true,
-      // Returns the JSON body expected from the backend.
-      json: async () => ({ audio_url: '/audios/audio.wav', summarized_text: null }),
+    it('generates a structured podcast script', async () => {
+        const generatedScript = {
+            title: 'Inside SQLite',
+            segments: [
+                { speaker: 'host' as const, text: 'Where does SQLite run?' },
+                { speaker: 'guest' as const, text: 'Inside the application.' },
+            ],
+        };
+        const fetchMock = vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => generatedScript,
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const payload = {
+            text: 'SQLite source material',
+            format: 'interview' as const,
+            duration: 'short' as const,
+        };
+        const result = await generatePodcastScript(payload);
+        expect(fetchMock).toHaveBeenCalledWith('/api/podcast-scripts', {
+            method: 'POST',
+            headers: {
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+        });
+        expect(result).toEqual(generatedScript);
     });
-    // Installs the mocked fetch function as the global fetch implementation.
-    vi.stubGlobal('fetch', fetchMock);
-
-    // Builds the typed request payload that should be sent to the backend.
-    const payload: AudioRequest = {
-      // Supplies the text to generate audio from.
-      text: 'Hello',
-      // Supplies the selected Kokoro language code.
-      language_code: 'a',
-      // Disables summarization for this request.
-      summarize: false,
-    };
-
-    // Calls the production helper being tested.
-    const result = await generateAudio(payload);
-
-    // Confirms the helper requested the expected audio endpoint and request options.
-    expect(fetchMock).toHaveBeenCalledWith('/api/audio', {
-      // Confirms the helper uses POST for generation.
-      method: 'POST',
-      // Confirms the helper sends and accepts JSON.
-      headers: {
-        // Confirms the helper asks for a JSON response.
-        Accept: 'application/json',
-        // Confirms the helper declares a JSON request body.
-        'Content-Type': 'application/json',
-      },
-      // Confirms the helper serializes the payload as JSON.
-      body: JSON.stringify(payload),
+    it('starts a grounded podcast workflow', async () => {
+        const workflow = {
+            workflow_id: 'workflow-123',
+            status: 'awaiting_review' as const,
+            script: {
+                title: 'Inside SQLite',
+                segments: [{ speaker: 'host' as const, text: 'SQLite is embedded.' }],
+            },
+            facts: ['SQLite runs in the application process.'],
+            issues: [],
+            revision_count: 0,
+            audio_job_id: null,
+        };
+        const fetchMock = vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => workflow,
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const payload = {
+            text: 'SQLite source material',
+            format: 'narration' as const,
+            duration: 'short' as const,
+        };
+        const result = await startPodcastWorkflow(payload);
+        expect(fetchMock).toHaveBeenCalledWith('/api/podcast-workflows', {
+            method: 'POST',
+            headers: {
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+        });
+        expect(result).toEqual(workflow);
     });
-    // Confirms the helper returns the parsed audio response.
-    expect(result).toEqual({
-      // Confirms the generated audio URL is preserved.
-      audio_url: '/audios/audio.wav',
-      // Confirms a missing summary remains null.
-      summarized_text: null,
+    it('approves a podcast workflow', async () => {
+        const fetchMock = vi.fn().mockResolvedValue({
+            ok: true,
+            status: 202,
+            json: async () => ({ job_id: 'workflow-123' }),
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const approval = {
+            script: {
+                title: 'Inside SQLite',
+                segments: [{ speaker: 'host' as const, text: 'SQLite is embedded.' }],
+            },
+            language_code: 'a',
+            host_voice: 'af_heart',
+            guest_voice: 'af_bella',
+        };
+        const result = await approvePodcastWorkflow('workflow-123', approval);
+        expect(fetchMock).toHaveBeenCalledWith('/api/podcast-workflows/workflow-123/approve', {
+            method: 'POST',
+            headers: {
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(approval),
+        });
+        expect(result).toEqual({ job_id: 'workflow-123' });
     });
-  });
-
-  // Verifies backend error details become thrown Error messages.
-  it('turns backend errors into thrown messages', async () => {
-    // Installs a mocked fetch function that returns a failed response.
-    vi.stubGlobal(
-      // Names the global function being mocked.
-      'fetch',
-      // Creates the mocked failed fetch response.
-      vi.fn().mockResolvedValue({
-        // Marks the mocked response as failed.
-        ok: false,
-        // Supplies the HTTP status used by the fallback message.
-        status: 500,
-        // Supplies the backend error detail the client should prefer.
-        json: async () => ({ detail: 'Could not generate audio' }),
-      }),
-    );
-
-    // Calls the helper and asserts that it rejects with the backend message.
-    await expect(
-      // Sends a valid request body so only the mocked response controls the failure.
-      generateAudio({ text: 'Hello', language_code: 'a', summarize: false }),
-    // Confirms the thrown Error message is the backend detail.
-    ).rejects.toThrow('Could not generate audio');
-  });
-
-  // Verifies the async audio-job helper posts the correct request.
-  it('posts async audio job requests', async () => {
-    // Creates a mocked successful fetch response for a created job.
-    const fetchMock = vi.fn().mockResolvedValue({
-      // Marks the mocked response as successful.
-      ok: true,
-      // Returns the JSON body expected from the async job endpoint.
-      json: async () => ({ job_id: 'job-123' }),
+    it('fetches a persisted podcast workflow', async () => {
+        const workflow = {
+            workflow_id: 'workflow-123',
+            status: 'awaiting_review' as const,
+            script: {
+                title: 'Recovered',
+                segments: [{ speaker: 'host' as const, text: 'Recovered turn.' }],
+            },
+            facts: ['Recovered fact.'],
+            issues: [],
+            revision_count: 0,
+            audio_job_id: null,
+        };
+        const fetchMock = vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => workflow,
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const result = await fetchPodcastWorkflow('workflow-123');
+        expect(fetchMock).toHaveBeenCalledWith('/api/podcast-workflows/workflow-123', { headers: { Accept: 'application/json' } });
+        expect(result).toEqual(workflow);
     });
-    // Installs the mocked fetch function as the global fetch implementation.
-    vi.stubGlobal('fetch', fetchMock);
-
-    // Builds the typed request payload that should be sent to the backend.
-    const payload: AudioRequest = {
-      // Supplies the text to generate audio from.
-      text: 'Hello',
-      // Supplies the selected Kokoro language code.
-      language_code: 'a',
-      // Disables summarization for this request.
-      summarize: false,
-    };
-
-    // Calls the production helper being tested.
-    const result = await createAudioJob(payload);
-
-    // Confirms the helper requested the expected async job endpoint and request options.
-    expect(fetchMock).toHaveBeenCalledWith('/api/audio-jobs', {
-      // Confirms the helper uses POST for job creation.
-      method: 'POST',
-      // Confirms the helper sends and accepts JSON.
-      headers: {
-        // Confirms the helper asks for a JSON response.
-        Accept: 'application/json',
-        // Confirms the helper declares a JSON request body.
-        'Content-Type': 'application/json',
-      },
-      // Confirms the helper serializes the payload as JSON.
-      body: JSON.stringify(payload),
+    it('posts audio generation requests', async () => {
+        const fetchMock = vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => ({ audio_url: '/audios/audio.wav', summarized_text: null }),
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const payload: AudioRequest = {
+            text: 'Hello',
+            language_code: 'a',
+            voice: 'af_heart',
+            summarize: false,
+        };
+        const result = await generateAudio(payload);
+        expect(fetchMock).toHaveBeenCalledWith('/api/audio', {
+            method: 'POST',
+            headers: {
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+        });
+        expect(result).toEqual({
+            audio_url: '/audios/audio.wav',
+            summarized_text: null,
+        });
     });
-    // Confirms the helper returns the parsed job creation response.
-    expect(result).toEqual({ job_id: 'job-123' });
-  });
-
-  // Verifies the async audio-job SSE URL builder.
-  it('builds audio job event stream URLs', () => {
-    // Confirms the helper builds the backend-relative EventSource URL.
-    expect(buildAudioJobEventsUrl('job 123')).toBe('/api/audio-jobs/job%20123/events');
-  });
-
-  // Verifies relative audio URLs stay relative without a configured API base URL.
-  it('keeps relative audio URLs relative when no API base URL is configured', () => {
-    // Confirms the helper returns the unchanged relative audio path.
-    expect(buildAudioUrl('/audios/audio.wav')).toBe('/audios/audio.wav');
-  });
+    it('turns backend errors into thrown messages', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+            ok: false,
+            status: 500,
+            json: async () => ({ detail: 'Could not generate audio' }),
+        }));
+        await expect(generateAudio({
+            text: 'Hello',
+            language_code: 'a',
+            voice: 'af_heart',
+            summarize: false,
+        })).rejects.toThrow('Could not generate audio');
+    });
+    it('posts async audio job requests', async () => {
+        const fetchMock = vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => ({ job_id: 'job-123' }),
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const payload: AudioRequest = {
+            text: 'Hello',
+            language_code: 'a',
+            voice: 'af_heart',
+            summarize: false,
+        };
+        const result = await createAudioJob(payload);
+        expect(fetchMock).toHaveBeenCalledWith('/api/audio-jobs', {
+            method: 'POST',
+            headers: {
+                Accept: 'application/json',
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+        });
+        expect(result).toEqual({ job_id: 'job-123' });
+    });
+    it('fetches recent audio jobs', async () => {
+        const fetchMock = vi.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => [],
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const result = await fetchAudioJobs(12);
+        expect(fetchMock).toHaveBeenCalledWith('/api/audio-jobs?limit=12', {
+            headers: { Accept: 'application/json' },
+        });
+        expect(result).toEqual([]);
+    });
+    it('deletes an audio job', async () => {
+        const fetchMock = vi.fn().mockResolvedValue({
+            ok: true,
+            status: 204,
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        await expect(deleteAudioJob('job 123')).resolves.toBeUndefined();
+        expect(fetchMock).toHaveBeenCalledWith('/api/audio-jobs/job%20123', {
+            method: 'DELETE',
+            headers: { Accept: 'application/json' },
+        });
+    });
+    it('cancels an audio job', async () => {
+        const cancelledJob = {
+            job_id: 'job 123',
+            status: 'cancelled',
+            queue_position: null,
+            progress: 0,
+        };
+        const fetchMock = vi.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => cancelledJob,
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        await expect(cancelAudioJob('job 123')).resolves.toEqual(cancelledJob);
+        expect(fetchMock).toHaveBeenCalledWith('/api/audio-jobs/job%20123/cancel', {
+            method: 'POST',
+            headers: { Accept: 'application/json' },
+        });
+    });
+    it('builds audio job event stream URLs', () => {
+        expect(buildAudioJobEventsUrl('job 123')).toBe('/api/audio-jobs/job%20123/events');
+    });
+    it('builds audio job download URLs', () => {
+        expect(buildAudioJobDownloadUrl('job 123')).toBe('/api/audio-jobs/job%20123/download');
+    });
+    it('keeps relative audio URLs relative when no API base URL is configured', () => {
+        expect(buildAudioUrl('/audios/audio.wav')).toBe('/audios/audio.wav');
+    });
 });

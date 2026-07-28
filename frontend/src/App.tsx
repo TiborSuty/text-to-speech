@@ -1,439 +1,901 @@
-// Imports React hooks and the form event type used by the submit handler.
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
-
-// Imports the component stylesheet.
 import './App.css';
-// Imports API helpers for backend communication, SSE URL creation, and audio URL resolution.
-import { buildAudioJobEventsUrl, buildAudioUrl, createAudioJob, fetchLanguages } from './api';
-// Imports the types used for audio job and language state.
-import type { AudioJobStatus, AudioJobStatusResponse, LanguageOption } from './types';
-
-// Picks the initial language code after the backend language list loads.
-function getInitialLanguage(languages: LanguageOption[]): string {
-  // Prefers American English, then falls back to the first available language, then empty state.
-  return languages.find((language) => language.code === 'a')?.code ?? languages[0]?.code ?? '';
+import { buildAudioJobDownloadUrl, buildAudioJobEventsUrl, buildAudioUrl, approvePodcastWorkflow, cancelAudioJob, createAudioJob, deleteAudioJob, fetchAppConfig, fetchAudioJobs, fetchLanguages, fetchPodcastWorkflow, startPodcastWorkflow, } from './api';
+import type { AudioJobStatus, AudioJobStatusResponse, AudioSegment, LanguageOption, PodcastDuration, PodcastFormat, PodcastScript, PodcastScriptSegment, } from './types';
+function getInitialLanguage(languages: LanguageOption[]): LanguageOption | null {
+    return languages.find((language) => language.code === 'a') ?? languages[0] ?? null;
 }
-
-// Parses one Server-Sent Event payload from the backend.
 function parseAudioJobEvent(data: string): AudioJobStatusResponse | null {
-  // Catches malformed event payloads so the UI can show a controlled error.
-  try {
-    // Parses the JSON status payload sent in the SSE data field.
-    return JSON.parse(data) as AudioJobStatusResponse;
-  // Handles invalid JSON from the event stream.
-  } catch {
-    // Signals that the event payload could not be parsed.
-    return null;
-  }
-}
-
-// Returns whether the job status means generation is still active.
-function isActiveAudioJobStatus(status: AudioJobStatus | null): boolean {
-  // Treats queued, summarizing, and generating as active states.
-  return status === 'queued' || status === 'summarizing' || status === 'generating';
-}
-
-// Converts job state into user-visible status text.
-function getGenerationStatus(
-  // Receives the latest job status from the SSE stream.
-  jobStatus: AudioJobStatus | null,
-  // Receives the resolved audio URL used to detect completed output.
-  resolvedAudioUrl: string | null,
-): string {
-  // Shows that the backend accepted the job and it is waiting to run.
-  if (jobStatus === 'queued') {
-    // Returns the queued status label.
-    return 'Queued';
-  }
-
-  // Shows that the backend is summarizing before audio generation.
-  if (jobStatus === 'summarizing') {
-    // Returns the summarizing status label.
-    return 'Summarizing text';
-  }
-
-  // Shows that the backend is producing the audio file.
-  if (jobStatus === 'generating') {
-    // Returns the generating status label.
-    return 'Generating audio';
-  }
-
-  // Shows readiness when the generated audio URL is available.
-  if (resolvedAudioUrl) {
-    // Returns the completed status label.
-    return 'Audio ready';
-  }
-
-  // Shows no status before generation starts or after a failure alert appears.
-  return '';
-}
-
-// Defines the top-level React component for the text-to-speech UI.
-export default function App() {
-  // Stores the language options loaded from the backend.
-  const [languages, setLanguages] = useState<LanguageOption[]>([]);
-  // Stores the currently selected language code.
-  const [languageCode, setLanguageCode] = useState('');
-  // Stores the user's text input.
-  const [text, setText] = useState('');
-  // Stores whether the user wants the backend to summarize text first.
-  const [summarize, setSummarize] = useState(false);
-  // Stores the generated audio URL returned by the backend.
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
-  // Stores the optional summary returned by the backend.
-  const [summarizedText, setSummarizedText] = useState<string | null>(null);
-  // Tracks whether the language list request is still running.
-  const [isLoadingLanguages, setIsLoadingLanguages] = useState(true);
-  // Stores the latest async audio job status received from the SSE stream.
-  const [jobStatus, setJobStatus] = useState<AudioJobStatus | null>(null);
-  // Stores a user-visible error message when a request fails.
-  const [error, setError] = useState<string | null>(null);
-  // Stores the current EventSource connection so it can be closed later.
-  const audioEventsRef = useRef<EventSource | null>(null);
-
-  // Removes surrounding whitespace so blank input cannot be submitted.
-  const trimmedText = text.trim();
-  // Derives whether an audio job is currently running.
-  const isGenerating = isActiveAudioJobStatus(jobStatus);
-  // Enables generation only when there is text, a selected language, and no active request.
-  const canGenerate = Boolean(trimmedText) && Boolean(languageCode) && !isGenerating;
-  // Memoizes the browser-ready audio URL so it only recalculates when audioUrl changes.
-  const resolvedAudioUrl = useMemo(
-    // Converts the backend URL into a playable URL, or keeps null when no audio exists.
-    () => (audioUrl ? buildAudioUrl(audioUrl) : null),
-    // Re-runs the memoized calculation whenever the backend audio URL changes.
-    [audioUrl],
-  );
-  // Builds the short status text announced below the form.
-  const generationStatus = getGenerationStatus(jobStatus, resolvedAudioUrl);
-
-  // Loads supported languages once when the component mounts.
-  useEffect(() => {
-    // Tracks whether the component is still mounted before setting state.
-    let isMounted = true;
-
-    // Defines the async language-loading workflow.
-    async function loadLanguages() {
-      // Attempts to fetch language options from the backend.
-      try {
-        // Requests the language list through the API client.
-        const options = await fetchLanguages();
-        // Stops if the component unmounted before the request completed.
-        if (!isMounted) {
-          // Exits without updating React state after unmount.
-          return;
-        }
-
-        // Stores the loaded language options for the selector.
-        setLanguages(options);
-        // Chooses the initial selected language from the loaded options.
-        setLanguageCode(getInitialLanguage(options));
-      // Handles failures from the language-loading request.
-      } catch (loadError) {
-        // Stops if the component unmounted before the request failed.
-        if (!isMounted) {
-          // Exits without updating React state after unmount.
-          return;
-        }
-
-        // Stores a displayable error message for the alert area.
-        setError(
-          // Uses the real Error message when the failure is an Error instance.
-          loadError instanceof Error
-            // Reads the message from the thrown Error.
-            ? loadError.message
-            // Falls back to a generic message for non-Error throws.
-            : 'Could not load supported languages',
-        );
-      // Runs cleanup state changes after success or failure.
-      } finally {
-        // Updates loading state only while the component is still mounted.
-        if (isMounted) {
-          // Marks the language request as finished.
-          setIsLoadingLanguages(false);
-        }
-      }
-    }
-
-    // Starts loading languages after the component has mounted.
-    loadLanguages();
-
-    // Returns a cleanup function for when the component unmounts.
-    return () => {
-      // Prevents late async responses from setting state after unmount.
-      isMounted = false;
-    };
-  // Uses an empty dependency list so languages load only once.
-  }, []);
-
-  // Closes the SSE connection when the component unmounts.
-  useEffect(() => {
-    // Returns the cleanup function React runs during unmount.
-    return () => {
-      // Closes the current EventSource connection if one exists.
-      audioEventsRef.current?.close();
-      // Clears the stored EventSource reference.
-      audioEventsRef.current = null;
-    };
-  // Uses an empty dependency list so cleanup is registered once.
-  }, []);
-
-  // Handles the form submission that asks the backend to generate audio.
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    // Prevents the browser from reloading the page on form submit.
-    event.preventDefault();
-
-    // Refuses to submit while required input is missing or generation is active.
-    if (!canGenerate) {
-      // Leaves state unchanged when generation is not allowed.
-      return;
-    }
-
-    // Closes any previous SSE connection before starting a new job.
-    audioEventsRef.current?.close();
-    // Clears the previous EventSource reference.
-    audioEventsRef.current = null;
-    // Shows the queued state while the backend accepts and starts the job.
-    setJobStatus('queued');
-    // Clears any previous error before starting a fresh request.
-    setError(null);
-    // Clears old audio so stale playback is not shown during the new request.
-    setAudioUrl(null);
-    // Clears old summary text before receiving the next response.
-    setSummarizedText(null);
-
-    // Attempts to create an async audio job and subscribe to status events.
     try {
-      // Creates the backend job with the trimmed text, selected language, and summarize option.
-      const response = await createAudioJob({
-        // Passes the whitespace-trimmed text to the backend.
-        text: trimmedText,
-        // Passes the currently selected language code to Kokoro via the API.
-        language_code: languageCode,
-        // Passes whether summarization should happen before speech generation.
-        summarize,
-      });
-
-      // Opens an SSE connection for this job's progress stream.
-      const eventSource = new EventSource(buildAudioJobEventsUrl(response.job_id));
-      // Stores the EventSource so it can be closed on unmount or replacement.
-      audioEventsRef.current = eventSource;
-
-      // Handles each status event streamed by the backend.
-      eventSource.onmessage = (message) => {
-        // Parses the JSON payload from the SSE data field.
-        const job = parseAudioJobEvent(message.data);
-        // Handles malformed event payloads as a controlled failure.
-        if (!job) {
-          // Marks the job as failed so the form can be used again.
-          setJobStatus('failed');
-          // Shows a useful parse-failure message.
-          setError('Could not read audio job update');
-          // Closes the broken event stream.
-          eventSource.close();
-          // Clears the stored EventSource if it still points at this stream.
-          if (audioEventsRef.current === eventSource) {
-            // Removes the closed stream reference.
-            audioEventsRef.current = null;
-          }
-          // Stops processing this malformed event.
-          return;
-        }
-
-        // Stores the latest streamed job status.
-        setJobStatus(job.status);
-
-        // Handles successful terminal jobs.
-        if (job.status === 'done') {
-          // Checks that the done event contains an audio URL.
-          if (job.audio_url) {
-            // Stores the generated audio URL from the job event.
-            setAudioUrl(job.audio_url);
-            // Stores the optional summary text from the job event.
-            setSummarizedText(job.summarized_text);
-          // Handles an invalid done event without an audio URL.
-          } else {
-            // Stores a controlled error for the invalid terminal event.
-            setError('Audio job finished without an audio URL');
-            // Marks the job as failed so the form can be used again.
-            setJobStatus('failed');
-          }
-          // Closes the completed event stream.
-          eventSource.close();
-          // Clears the stored EventSource if it still points at this stream.
-          if (audioEventsRef.current === eventSource) {
-            // Removes the closed stream reference.
-            audioEventsRef.current = null;
-          }
-        }
-
-        // Handles failed terminal jobs.
-        if (job.status === 'failed') {
-          // Shows the backend failure message or a generic fallback.
-          setError(job.error ?? 'Could not generate audio');
-          // Closes the failed event stream.
-          eventSource.close();
-          // Clears the stored EventSource if it still points at this stream.
-          if (audioEventsRef.current === eventSource) {
-            // Removes the closed stream reference.
-            audioEventsRef.current = null;
-          }
-        }
-      };
-
-      // Handles network or connection-level SSE failures.
-      eventSource.onerror = () => {
-        // Marks the job as failed so the form can be used again.
-        setJobStatus('failed');
-        // Shows a clear stream-level error message.
-        setError('Lost connection to audio job updates');
-        // Closes the broken event stream.
-        eventSource.close();
-        // Clears the stored EventSource if it still points at this stream.
-        if (audioEventsRef.current === eventSource) {
-          // Removes the closed stream reference.
-          audioEventsRef.current = null;
-        }
-      };
-    // Handles request failures from the API client.
-    } catch (generateError) {
-      // Clears the queued state because job creation failed before SSE started.
-      setJobStatus(null);
-      // Stores a displayable error message for the alert area.
-      setError(
-        // Uses the real Error message when one was thrown.
-        generateError instanceof Error
-          // Reads the message from the thrown Error.
-          ? generateError.message
-          // Falls back to a generic message for non-Error throws.
-          : 'Could not generate audio',
-      );
+        return JSON.parse(data) as AudioJobStatusResponse;
     }
-  }
+    catch {
+        return null;
+    }
+}
+function isActiveAudioJobStatus(status: AudioJobStatus | null): boolean {
+    return (status === 'queued'
+        || status === 'summarizing'
+        || status === 'generating'
+        || status === 'cancel_requested');
+}
+type CreationMode = 'speech' | 'podcast';
+const PENDING_PODCAST_WORKFLOW_KEY = 'pending-podcast-workflow-id';
+function getGuestVoice(language: LanguageOption | null): string {
+    if (!language) {
+        return '';
+    }
+    return (language.voices.find((voice) => voice.id !== language.default_voice)?.id
+        ?? language.default_voice);
+}
+function getPodcastGenerationStatus(segments: PodcastScriptSegment[], progress: number): string | null {
+    if (segments.length === 0) {
+        return null;
+    }
+    const totalCharacters = segments.reduce((total, segment) => total + segment.text.length, 0);
+    const processedCharacters = totalCharacters * progress / 100;
+    let cumulativeCharacters = 0;
+    const currentSegmentIndex = segments.findIndex((segment) => {
+        cumulativeCharacters += segment.text.length;
+        return processedCharacters <= cumulativeCharacters;
+    });
+    const resolvedIndex = currentSegmentIndex === -1
+        ? segments.length - 1
+        : currentSegmentIndex;
+    const speaker = segments[resolvedIndex].speaker === 'host' ? 'Host' : 'Guest';
+    return `Generating turn ${resolvedIndex + 1} of ${segments.length} · ${speaker} · ${progress}%`;
+}
+function getGenerationStatus(jobStatus: AudioJobStatus | null, queuePosition: number | null, progress: number, resolvedAudioUrl: string | null): string {
+    if (jobStatus === 'queued') {
+        return queuePosition ? `Queued · Position ${queuePosition}` : 'Queued';
+    }
+    if (jobStatus === 'summarizing') {
+        return 'Summarizing text';
+    }
+    if (jobStatus === 'generating') {
+        return `Generating audio · ${progress}%`;
+    }
+    if (jobStatus === 'cancel_requested') {
+        return 'Cancelling';
+    }
+    if (jobStatus === 'cancelled') {
+        return 'Cancelled';
+    }
+    if (resolvedAudioUrl) {
+        return 'Audio ready';
+    }
+    return '';
+}
+const HISTORY_LIMIT = 20;
+const DEFAULT_MAX_TEXT_CHARACTERS = 50000;
+const jobDateFormatter = new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+});
+function formatJobDate(timestamp: string): string {
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) {
+        return 'Unknown time';
+    }
+    return jobDateFormatter.format(date);
+}
+function upsertAudioJob(currentJobs: AudioJobStatusResponse[], nextJob: AudioJobStatusResponse): AudioJobStatusResponse[] {
+    const remainingJobs = currentJobs.filter((job) => job.job_id !== nextJob.job_id);
+    return [nextJob, ...remainingJobs]
+        .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
+        .slice(0, HISTORY_LIMIT);
+}
+export default function App() {
+    const [creationMode, setCreationMode] = useState<CreationMode>('speech');
+    const [languages, setLanguages] = useState<LanguageOption[]>([]);
+    const [languageCode, setLanguageCode] = useState('');
+    const [voice, setVoice] = useState('');
+    const [text, setText] = useState('');
+    const [summarize, setSummarize] = useState(false);
+    const [podcastFormat, setPodcastFormat] = useState<PodcastFormat>('interview');
+    const [podcastDuration, setPodcastDuration] = useState<PodcastDuration>('short');
+    const [guestVoice, setGuestVoice] = useState('');
+    const [podcastScript, setPodcastScript] = useState<PodcastScript | null>(null);
+    const [podcastWorkflowId, setPodcastWorkflowId] = useState<string | null>(null);
+    const [podcastFacts, setPodcastFacts] = useState<string[]>([]);
+    const [podcastIssues, setPodcastIssues] = useState<string[]>([]);
+    const [podcastRevisionCount, setPodcastRevisionCount] = useState(0);
+    const [isGeneratingScript, setIsGeneratingScript] = useState(false);
+    const [scriptError, setScriptError] = useState<string | null>(null);
+    const [activePodcastSegments, setActivePodcastSegments] = useState<PodcastScriptSegment[]>([]);
+    const [audioUrl, setAudioUrl] = useState<string | null>(null);
+    const [summarizedText, setSummarizedText] = useState<string | null>(null);
+    const [isLoadingLanguages, setIsLoadingLanguages] = useState(true);
+    const [jobStatus, setJobStatus] = useState<AudioJobStatus | null>(null);
+    const [currentJobId, setCurrentJobId] = useState<string | null>(null);
+    const [queuePosition, setQueuePosition] = useState<number | null>(null);
+    const [jobProgress, setJobProgress] = useState(0);
+    const [maxTextCharacters, setMaxTextCharacters] = useState(DEFAULT_MAX_TEXT_CHARACTERS);
+    const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
+    const [error, setError] = useState<string | null>(null);
+    const [streamNotice, setStreamNotice] = useState<string | null>(null);
+    const [audioJobs, setAudioJobs] = useState<AudioJobStatusResponse[]>([]);
+    const [isLoadingHistory, setIsLoadingHistory] = useState(true);
+    const [historyError, setHistoryError] = useState<string | null>(null);
+    const [deletingJobId, setDeletingJobId] = useState<string | null>(null);
+    const audioEventsRef = useRef<EventSource | null>(null);
+    const trimmedText = text.trim();
+    const selectedLanguage = languages.find((language) => language.code === languageCode);
+    const isGenerating = isActiveAudioJobStatus(jobStatus);
+    const podcastScriptText = podcastScript?.segments
+        .map((segment) => segment.text.trim())
+        .filter(Boolean)
+        .join('\n') ?? '';
+    const podcastJobText = podcastScript
+        ? [podcastScript.title.trim(), podcastScriptText].filter(Boolean).join('\n')
+        : '';
+    const hasValidPodcastScript = Boolean(podcastScript
+        && podcastScript.title.trim()
+        && podcastScript.segments.length > 0
+        && podcastScript.segments.every((segment) => Boolean(segment.text.trim()))
+        && podcastJobText.length <= maxTextCharacters);
+    const canGenerate = (creationMode === 'speech'
+        ? Boolean(trimmedText) && trimmedText.length <= maxTextCharacters
+        : hasValidPodcastScript && Boolean(podcastWorkflowId))
+        && Boolean(languageCode)
+        && Boolean(voice)
+        && (creationMode === 'speech' || Boolean(guestVoice))
+        && !isGeneratingScript
+        && !isGenerating;
+    const resolvedAudioUrl = useMemo(() => (audioUrl ? buildAudioUrl(audioUrl) : null), [audioUrl]);
+    const generationStatus = (jobStatus === 'generating'
+        && activePodcastSegments.length > 0)
+        ? getPodcastGenerationStatus(activePodcastSegments, jobProgress)
+        : getGenerationStatus(jobStatus, queuePosition, jobProgress, resolvedAudioUrl);
+    const displayedGenerationStatus = streamNotice ?? generationStatus;
+    useEffect(() => {
+        let isMounted = true;
+        fetchAppConfig()
+            .then((config) => {
+            if (isMounted) {
+                setMaxTextCharacters(config.max_text_characters);
+            }
+        })
+            .catch(() => undefined);
+        return () => {
+            isMounted = false;
+        };
+    }, []);
+    useEffect(() => {
+        const pendingWorkflowId = window.localStorage.getItem(PENDING_PODCAST_WORKFLOW_KEY);
+        if (!pendingWorkflowId) {
+            return undefined;
+        }
+        let isMounted = true;
+        fetchPodcastWorkflow(pendingWorkflowId)
+            .then((workflow) => {
+            if (!isMounted) {
+                return;
+            }
+            if (workflow.status !== 'awaiting_review') {
+                window.localStorage.removeItem(PENDING_PODCAST_WORKFLOW_KEY);
+                return;
+            }
+            setCreationMode('podcast');
+            setPodcastWorkflowId(workflow.workflow_id);
+            setPodcastScript(workflow.script);
+            setPodcastFacts(workflow.facts);
+            setPodcastIssues(workflow.issues);
+            setPodcastRevisionCount(workflow.revision_count);
+        })
+            .catch(() => undefined);
+        return () => {
+            isMounted = false;
+        };
+    }, []);
+    useEffect(() => {
+        let isMounted = true;
+        async function loadLanguages() {
+            try {
+                const options = await fetchLanguages();
+                if (!isMounted) {
+                    return;
+                }
+                setLanguages(options);
+                const initialLanguage = getInitialLanguage(options);
+                setLanguageCode(initialLanguage?.code ?? '');
+                setVoice(initialLanguage?.default_voice ?? '');
+                setGuestVoice(getGuestVoice(initialLanguage));
+            }
+            catch (loadError) {
+                if (!isMounted) {
+                    return;
+                }
+                setError(loadError instanceof Error
+                    ? loadError.message
+                    : 'Could not load supported languages');
+            }
+            finally {
+                if (isMounted) {
+                    setIsLoadingLanguages(false);
+                }
+            }
+        }
+        loadLanguages();
+        return () => {
+            isMounted = false;
+        };
+    }, []);
+    useEffect(() => {
+        let isMounted = true;
+        async function loadAudioJobs() {
+            try {
+                const jobs = await fetchAudioJobs(HISTORY_LIMIT);
+                if (!isMounted) {
+                    return;
+                }
+                setAudioJobs((currentJobs) => jobs.reduce((mergedJobs, job) => upsertAudioJob(mergedJobs, job), currentJobs));
+            }
+            catch (loadError) {
+                if (!isMounted) {
+                    return;
+                }
+                setHistoryError(loadError instanceof Error
+                    ? loadError.message
+                    : 'Could not load recent generations');
+            }
+            finally {
+                if (isMounted) {
+                    setIsLoadingHistory(false);
+                }
+            }
+        }
+        loadAudioJobs();
+        return () => {
+            isMounted = false;
+        };
+    }, []);
+    function handleLanguageChange(nextLanguageCode: string) {
+        const nextLanguage = languages.find((language) => language.code === nextLanguageCode);
+        setLanguageCode(nextLanguageCode);
+        setVoice(nextLanguage?.default_voice ?? '');
+        setGuestVoice(getGuestVoice(nextLanguage ?? null));
+    }
+    function invalidatePodcastWorkflow() {
+        window.localStorage.removeItem(PENDING_PODCAST_WORKFLOW_KEY);
+        setPodcastWorkflowId(null);
+        setPodcastScript(null);
+        setPodcastFacts([]);
+        setPodcastIssues([]);
+        setPodcastRevisionCount(0);
+        setScriptError(null);
+    }
+    async function handleGeneratePodcastScript() {
+        if (!trimmedText
+            || trimmedText.length > maxTextCharacters
+            || isGeneratingScript
+            || isGenerating) {
+            return;
+        }
+        setIsGeneratingScript(true);
+        setScriptError(null);
+        try {
+            const workflow = await startPodcastWorkflow({
+                text: trimmedText,
+                format: podcastFormat,
+                duration: podcastDuration,
+            });
+            setPodcastWorkflowId(workflow.workflow_id);
+            window.localStorage.setItem(PENDING_PODCAST_WORKFLOW_KEY, workflow.workflow_id);
+            setPodcastScript(workflow.script);
+            setPodcastFacts(workflow.facts);
+            setPodcastIssues(workflow.issues);
+            setPodcastRevisionCount(workflow.revision_count);
+        }
+        catch (generateScriptError) {
+            setScriptError(generateScriptError instanceof Error
+                ? generateScriptError.message
+                : 'Could not generate podcast script');
+        }
+        finally {
+            setIsGeneratingScript(false);
+        }
+    }
+    function updatePodcastSegment(segmentIndex: number, update: Partial<PodcastScriptSegment>) {
+        setPodcastScript((currentScript) => {
+            if (!currentScript) {
+                return currentScript;
+            }
+            return {
+                ...currentScript,
+                segments: currentScript.segments.map((segment, index) => index === segmentIndex ? { ...segment, ...update } : segment),
+            };
+        });
+    }
+    function addPodcastSegment() {
+        setPodcastScript((currentScript) => {
+            if (!currentScript || currentScript.segments.length >= 24) {
+                return currentScript;
+            }
+            const lastSpeaker = currentScript.segments.at(-1)?.speaker ?? 'guest';
+            return {
+                ...currentScript,
+                segments: [
+                    ...currentScript.segments,
+                    {
+                        speaker: lastSpeaker === 'host' ? 'guest' : 'host',
+                        text: '',
+                    },
+                ],
+            };
+        });
+    }
+    function removePodcastSegment(segmentIndex: number) {
+        setPodcastScript((currentScript) => {
+            if (!currentScript || currentScript.segments.length <= 1) {
+                return currentScript;
+            }
+            return {
+                ...currentScript,
+                segments: currentScript.segments.filter((_segment, index) => index !== segmentIndex),
+            };
+        });
+    }
+    useEffect(() => {
+        return () => {
+            audioEventsRef.current?.close();
+            audioEventsRef.current = null;
+        };
+    }, []);
+    async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+        event.preventDefault();
+        if (!canGenerate) {
+            return;
+        }
+        audioEventsRef.current?.close();
+        audioEventsRef.current = null;
+        setJobStatus('queued');
+        setQueuePosition(null);
+        setJobProgress(0);
+        setCurrentJobId(null);
+        setError(null);
+        setStreamNotice(null);
+        setAudioUrl(null);
+        setSummarizedText(null);
+        try {
+            const podcastSegments: AudioSegment[] | undefined = (creationMode === 'podcast' && podcastScript)
+                ? podcastScript.segments.map((segment) => ({
+                    speaker: segment.speaker,
+                    text: segment.text.trim(),
+                    voice: segment.speaker === 'host' ? voice : guestVoice,
+                }))
+                : undefined;
+            setActivePodcastSegments(podcastSegments?.map(({ speaker, text: segmentText }) => ({
+                speaker,
+                text: segmentText,
+            })) ?? []);
+            const response = (creationMode === 'podcast'
+                && podcastScript
+                && podcastWorkflowId)
+                ? await approvePodcastWorkflow(podcastWorkflowId, {
+                    script: podcastScript,
+                    language_code: languageCode,
+                    host_voice: voice,
+                    guest_voice: guestVoice,
+                })
+                : await createAudioJob({
+                    text: trimmedText,
+                    language_code: languageCode,
+                    voice,
+                    summarize,
+                });
+            if (creationMode === 'podcast') {
+                window.localStorage.removeItem(PENDING_PODCAST_WORKFLOW_KEY);
+            }
+            setCurrentJobId(response.job_id);
+            const eventSource = new EventSource(buildAudioJobEventsUrl(response.job_id));
+            audioEventsRef.current = eventSource;
+            eventSource.onmessage = (message) => {
+                const job = parseAudioJobEvent(message.data);
+                if (!job) {
+                    setJobStatus('failed');
+                    setStreamNotice(null);
+                    setError('Could not read audio job update');
+                    eventSource.close();
+                    if (audioEventsRef.current === eventSource) {
+                        audioEventsRef.current = null;
+                    }
+                    return;
+                }
+                setStreamNotice(null);
+                setJobStatus(job.status);
+                setQueuePosition(job.queue_position);
+                setJobProgress(job.progress);
+                setAudioJobs((currentJobs) => upsertAudioJob(currentJobs, job));
+                if (job.status === 'done') {
+                    if (job.audio_url) {
+                        setAudioUrl(job.audio_url);
+                        setSummarizedText(job.summarized_text);
+                    }
+                    else {
+                        setError('Audio job finished without an audio URL');
+                        setJobStatus('failed');
+                    }
+                    eventSource.close();
+                    if (audioEventsRef.current === eventSource) {
+                        audioEventsRef.current = null;
+                    }
+                    setCurrentJobId(null);
+                }
+                if (job.status === 'failed') {
+                    setError(job.error ?? 'Could not generate audio');
+                    eventSource.close();
+                    if (audioEventsRef.current === eventSource) {
+                        audioEventsRef.current = null;
+                    }
+                    setCurrentJobId(null);
+                }
+                if (job.status === 'cancelled') {
+                    setAudioUrl(null);
+                    setSummarizedText(null);
+                    eventSource.close();
+                    if (audioEventsRef.current === eventSource) {
+                        audioEventsRef.current = null;
+                    }
+                    setCurrentJobId(null);
+                }
+            };
+            eventSource.onopen = () => {
+                if (audioEventsRef.current !== eventSource) {
+                    return;
+                }
+                setStreamNotice(null);
+            };
+            eventSource.onerror = () => {
+                if (audioEventsRef.current !== eventSource) {
+                    return;
+                }
+                setStreamNotice('Connection lost · Reconnecting');
+            };
+        }
+        catch (generateError) {
+            setJobStatus(null);
+            setCurrentJobId(null);
+            setQueuePosition(null);
+            setJobProgress(0);
+            setStreamNotice(null);
+            setError(generateError instanceof Error
+                ? generateError.message
+                : 'Could not generate audio');
+        }
+    }
+    async function handleCancelJob(jobId: string, primaryJob = false) {
+        if (cancellingJobId === jobId) {
+            return;
+        }
+        setCancellingJobId(jobId);
+        if (primaryJob) {
+            setError(null);
+        }
+        else {
+            setHistoryError(null);
+        }
+        try {
+            const job = await cancelAudioJob(jobId);
+            setAudioJobs((currentJobs) => upsertAudioJob(currentJobs, job));
+            if (jobId === currentJobId) {
+                setJobStatus(job.status);
+                setQueuePosition(job.queue_position);
+                setJobProgress(job.progress);
+                if (job.status === 'cancelled') {
+                    audioEventsRef.current?.close();
+                    audioEventsRef.current = null;
+                    setStreamNotice(null);
+                    setCurrentJobId(null);
+                }
+            }
+        }
+        catch (cancelError) {
+            const message = cancelError instanceof Error
+                ? cancelError.message
+                : 'Could not cancel audio job';
+            if (primaryJob) {
+                setError(message);
+            }
+            else {
+                setHistoryError(message);
+            }
+        }
+        finally {
+            setCancellingJobId((activeId) => activeId === jobId ? null : activeId);
+        }
+    }
+    async function handleDeleteJob(job: AudioJobStatusResponse) {
+        const confirmed = window.confirm(`Delete the audio for "${job.text_preview}"?`);
+        if (!confirmed) {
+            return;
+        }
+        setDeletingJobId(job.job_id);
+        setHistoryError(null);
+        try {
+            await deleteAudioJob(job.job_id);
+            setAudioJobs((currentJobs) => currentJobs.filter((currentJob) => currentJob.job_id !== job.job_id));
+            if (job.audio_url && job.audio_url === audioUrl) {
+                setAudioUrl(null);
+                setSummarizedText(null);
+                setJobStatus(null);
+            }
+        }
+        catch (deleteError) {
+            setHistoryError(deleteError instanceof Error
+                ? deleteError.message
+                : 'Could not delete audio job');
+        }
+        finally {
+            setDeletingJobId(null);
+        }
+    }
+    return (<main className="app-shell">
 
-  // Renders the application UI.
-  return (
-    // Provides the main page landmark and outer layout wrapper.
-    <main className="app-shell">
-      {/* Frames the interactive generator and links it to the heading for accessibility. */}
       <section className="tool-panel" aria-labelledby="app-title">
-        {/* Groups the eyebrow label and main heading. */}
+
         <div className="title-block">
-          {/* Displays the small category label above the title. */}
+
           <p className="eyebrow">Text to speech</p>
-          {/* Displays the main application title. */}
+
           <h1 id="app-title">AI Podcaster</h1>
         </div>
 
-        {/* Wraps the language, text, summarize, and submit controls. */}
+
+        <div className="creation-mode" role="group" aria-label="Creation mode">
+
+          <button className={creationMode === 'speech' ? 'creation-mode-active' : ''} type="button" aria-pressed={creationMode === 'speech'} disabled={isGenerating || isGeneratingScript} onClick={() => setCreationMode('speech')}>
+            Text to speech
+          </button>
+
+          <button className={creationMode === 'podcast' ? 'creation-mode-active' : ''} type="button" aria-pressed={creationMode === 'podcast'} disabled={isGenerating || isGeneratingScript} onClick={() => setCreationMode('podcast')}>
+            Podcast Director
+          </button>
+        </div>
+
+
         <form className="generator-form" onSubmit={handleSubmit}>
-          {/* Labels the language selector so screen readers can identify it. */}
+
+          {creationMode === 'podcast' ? (<fieldset className="director-brief">
+
+              <legend>Creative direction</legend>
+
+              <div className="director-controls">
+
+                <label className="field">
+                  <span>Format</span>
+                  <select value={podcastFormat} disabled={isGenerating || isGeneratingScript} onChange={(event) => {
+                setPodcastFormat(event.target.value as PodcastFormat);
+                invalidatePodcastWorkflow();
+            }}>
+                    <option value="narration">Narration</option>
+                    <option value="interview">Interview</option>
+                    <option value="explainer">Explainer</option>
+                  </select>
+                </label>
+
+                <label className="field">
+                  <span>Episode length</span>
+                  <select value={podcastDuration} disabled={isGenerating || isGeneratingScript} onChange={(event) => {
+                setPodcastDuration(event.target.value as PodcastDuration);
+                invalidatePodcastWorkflow();
+            }}>
+                    <option value="short">Short · 2–3 min</option>
+                    <option value="medium">Medium · 4–6 min</option>
+                    <option value="long">Long · 7–10 min</option>
+                  </select>
+                </label>
+              </div>
+            </fieldset>) : null}
+
+
           <label className="field">
-            {/* Displays the visible language selector label. */}
+
             <span>Select a language</span>
-            {/* Lets the user choose the speech language. */}
-            <select
-              /* Keeps the select value synchronized with React state. */
-              value={languageCode}
-              /* Updates the selected language when the user changes the dropdown. */
-              onChange={(event) => setLanguageCode(event.target.value)}
-              /* Prevents language changes while loading options or generating audio. */
-              disabled={isLoadingLanguages || isGenerating}
-            >
-              {/* Renders one option for each backend-supported language. */}
-              {languages.map((language) => (
-                /* Uses the stable language code as the React key and submitted value. */
-                <option key={language.code} value={language.code}>
-                  {/* Shows the language's user-facing label. */}
+
+            <select id="language" name="language" autoComplete="off" value={languageCode} onChange={(event) => handleLanguageChange(event.target.value)} disabled={isLoadingLanguages || isGenerating}>
+
+              {languages.map((language) => (<option key={language.code} value={language.code}>
+
                   {language.label}
-                </option>
-              ))}
+                </option>))}
             </select>
           </label>
 
-          {/* Labels the text input area so screen readers can identify it. */}
+
+          <div className={creationMode === 'podcast' ? 'voice-grid' : undefined}>
+
+            <label className="field">
+
+              <span>{creationMode === 'podcast' ? 'Host voice' : 'Select a voice'}</span>
+
+              <select id="voice" name="voice" autoComplete="off" value={voice} onChange={(event) => setVoice(event.target.value)} disabled={isLoadingLanguages || isGenerating || isGeneratingScript}>
+
+                {selectedLanguage?.voices.map((voiceOption) => (<option key={voiceOption.id} value={voiceOption.id}>
+                    {voiceOption.label}
+                  </option>))}
+              </select>
+            </label>
+
+
+            {creationMode === 'podcast' ? (<label className="field">
+                <span>Guest voice</span>
+                <select id="guest-voice" name="guest-voice" autoComplete="off" value={guestVoice} onChange={(event) => setGuestVoice(event.target.value)} disabled={isLoadingLanguages || isGenerating || isGeneratingScript}>
+                  {selectedLanguage?.voices.map((voiceOption) => (<option key={voiceOption.id} value={voiceOption.id}>
+                      {voiceOption.label}
+                    </option>))}
+                </select>
+              </label>) : null}
+          </div>
+
+
           <label className="field">
-            {/* Displays the visible text input label. */}
-            <span>Enter text</span>
-            {/* Lets the user enter the content to summarize or convert to speech. */}
-            <textarea
-              /* Keeps the textarea value synchronized with React state. */
-              value={text}
-              /* Updates the stored text whenever the user types. */
-              onChange={(event) => setText(event.target.value)}
-              /* Gives the textarea a comfortable default height. */
-              rows={10}
-              /* Prevents editing while the backend is generating audio. */
-              disabled={isGenerating}
-            />
+
+            <span className="field-heading">
+
+              <span>
+                {creationMode === 'podcast' ? 'Source material' : 'Enter text'}
+              </span>
+
+              <span className="character-count">
+                {text.length.toLocaleString()} / {maxTextCharacters.toLocaleString()}
+              </span>
+            </span>
+
+            <textarea id="text" name="text" autoComplete="off" value={text} onChange={(event) => {
+            setText(event.target.value);
+            if (creationMode === 'podcast') {
+                invalidatePodcastWorkflow();
+            }
+        }} maxLength={maxTextCharacters} rows={10} disabled={isGenerating || isGeneratingScript}/>
           </label>
 
-          {/* Labels the summarization checkbox as one clickable row. */}
-          <label className="checkbox-row">
-            {/* Lets the user opt into backend summarization before audio generation. */}
-            <input
-              /* Declares this control as a checkbox. */
-              type="checkbox"
-              /* Keeps the checked state synchronized with React state. */
-              checked={summarize}
-              /* Updates the summarize option when the user toggles the checkbox. */
-              onChange={(event) => setSummarize(event.target.checked)}
-              /* Prevents changing the option during an active generation request. */
-              disabled={isGenerating}
-            />
-            {/* Displays the visible checkbox label. */}
-            <span>Summarize text</span>
-          </label>
 
-          {/* Submits the form when generation is allowed. */}
-          <button type="submit" disabled={!canGenerate}>
-            {/* Shows progress text while loading and action text otherwise. */}
-            {isGenerating ? 'Generating audio' : 'Generate Audio'}
-          </button>
+          {creationMode === 'podcast' ? (<section className="script-workspace" aria-labelledby="script-workspace-title">
+
+              <div className="script-workspace-heading">
+                <div>
+                  <p className="script-kicker">Local AI script desk</p>
+                  <h2 id="script-workspace-title">
+                    {podcastScript ? 'Edit the conversation' : 'Build the conversation'}
+                  </h2>
+                </div>
+
+                <button className="generate-script" type="button" disabled={!trimmedText
+                || trimmedText.length > maxTextCharacters
+                || isGeneratingScript
+                || isGenerating} onClick={handleGeneratePodcastScript}>
+                  {isGeneratingScript
+                ? 'Writing script'
+                : podcastScript
+                    ? 'Regenerate script'
+                    : 'Generate script'}
+                </button>
+              </div>
+
+
+              {scriptError ? (<p className="script-error" role="alert">{scriptError}</p>) : null}
+
+
+              {podcastWorkflowId ? (<aside className={`grounding-review ${podcastIssues.length > 0 ? 'grounding-review-warning' : ''}`} aria-label="Source grounding review">
+                  <div className="grounding-review-heading">
+                    <strong>
+                      {podcastIssues.length > 0
+                    ? 'Human review needed'
+                    : 'Source review passed'}
+                    </strong>
+                    <span>
+                      {podcastFacts.length} source fact
+                      {podcastFacts.length === 1 ? '' : 's'} checked
+                      {podcastRevisionCount > 0
+                    ? ` · ${podcastRevisionCount} automatic ${podcastRevisionCount === 1 ? 'revision' : 'revisions'}`
+                    : ''}
+                    </span>
+                  </div>
+
+
+                  {podcastIssues.length > 0 ? (<ul className="grounding-issues">
+                      {podcastIssues.map((issue, issueIndex) => (<li key={`${issueIndex}-${issue}`}>{issue}</li>))}
+                    </ul>) : null}
+
+
+                  <details className="grounding-facts">
+                    <summary>View extracted facts</summary>
+                    <ul>
+                      {podcastFacts.map((fact, factIndex) => (<li key={`${factIndex}-${fact}`}>{fact}</li>))}
+                    </ul>
+                  </details>
+                </aside>) : null}
+
+
+              {podcastScript ? (<div className="script-editor">
+
+                  <label className="field script-title-field">
+                    <span>Episode title</span>
+                    <input type="text" value={podcastScript.title} maxLength={160} disabled={isGenerating} onChange={(event) => setPodcastScript({
+                    ...podcastScript,
+                    title: event.target.value,
+                })}/>
+                  </label>
+
+
+                  <div className="script-turns">
+                    {podcastScript.segments.map((segment, segmentIndex) => (<article className="script-turn" data-speaker={segment.speaker} key={`${segmentIndex}-${segment.speaker}`}>
+
+                        <div className="script-turn-heading">
+                          <span className="turn-number">
+                            Turn {segmentIndex + 1}
+                          </span>
+                          <select aria-label={`Speaker for turn ${segmentIndex + 1}`} value={segment.speaker} disabled={isGenerating} onChange={(event) => updatePodcastSegment(segmentIndex, {
+                        speaker: event.target.value as 'host' | 'guest',
+                    })}>
+                            <option value="host">Host</option>
+                            <option value="guest">Guest</option>
+                          </select>
+                          <button className="remove-turn" type="button" aria-label={`Remove turn ${segmentIndex + 1}`} disabled={isGenerating || podcastScript.segments.length <= 1} onClick={() => removePodcastSegment(segmentIndex)}>
+                            Remove
+                          </button>
+                        </div>
+
+                        <textarea className="script-turn-text" aria-label={`Text for turn ${segmentIndex + 1}`} value={segment.text} maxLength={10000} rows={4} disabled={isGenerating} onChange={(event) => updatePodcastSegment(segmentIndex, {
+                        text: event.target.value,
+                    })}/>
+                      </article>))}
+                  </div>
+
+
+                  <button className="add-turn" type="button" disabled={isGenerating || podcastScript.segments.length >= 24} onClick={addPodcastSegment}>
+                    Add turn
+                  </button>
+                </div>) : (<p className="script-empty">
+                  Generate a draft, then edit every host and guest turn before recording.
+                </p>)}
+            </section>) : (<label className="checkbox-row">
+              <input type="checkbox" id="summarize" name="summarize" checked={summarize} onChange={(event) => setSummarize(event.target.checked)} disabled={isGenerating}/>
+              <span>Summarize text</span>
+            </label>)}
+
+
+          <div className="form-actions">
+
+            <button type="submit" disabled={!canGenerate}>
+
+              {jobStatus === 'cancel_requested'
+            ? 'Cancelling'
+            : isGenerating
+                ? creationMode === 'podcast'
+                    ? 'Producing podcast'
+                    : 'Generating audio'
+                : creationMode === 'podcast'
+                    ? 'Approve & generate podcast'
+                    : 'Generate Audio'}
+            </button>
+
+            {isGenerating && currentJobId ? (<button className="cancel-generation" type="button" disabled={cancellingJobId === currentJobId} onClick={() => handleCancelJob(currentJobId, true)}>
+                {cancellingJobId === currentJobId ? 'Cancelling' : 'Cancel'}
+              </button>) : null}
+          </div>
         </form>
 
-        {/* Renders status text only after generation starts or completes. */}
-        {generationStatus ? (
-          // Announces generation progress and completion to assistive technology.
-          <p className="generation-status" role="status">
-            {/* Displays the current generation status string. */}
-            {generationStatus}
-          </p>
-        // Renders nothing when there is no status to show.
-        ) : null}
 
-        {/* Renders the error alert only when an error message exists. */}
-        {error ? (
-          // Uses role="alert" so assistive technology announces request failures.
-          <p className="error-message" role="alert">
-            {/* Displays the current request error message. */}
+        {displayedGenerationStatus ? (<p className="generation-status" role="status">
+
+            {displayedGenerationStatus}
+          </p>) : null}
+
+
+        {jobStatus === 'generating' ? (<progress className="generation-progress" aria-label="Audio generation progress" max={100} value={jobProgress}/>) : null}
+
+
+        {error ? (<p className="error-message" role="alert">
+
             {error}
-          </p>
-        // Renders nothing when there is no error.
-        ) : null}
+          </p>) : null}
 
-        {/* Renders the result area only after the backend returns an audio URL. */}
-        {resolvedAudioUrl ? (
-          // Groups the generated audio player and optional summary.
-          <section className="result-panel" aria-label="Generated result">
-            {/* Provides playback controls for the generated audio file. */}
-            <audio aria-label="Generated audio" controls src={resolvedAudioUrl} />
 
-            {/* Renders generated summary text only when the backend returned it. */}
-            {summarizedText ? (
-              // Frames the optional generated summary.
-              <div className="summary-panel">
-                {/* Labels the generated summary section. */}
+        {resolvedAudioUrl ? (<section className="result-panel" aria-label="Generated result">
+
+            <audio aria-label="Generated audio" controls src={resolvedAudioUrl}/>
+
+
+            {summarizedText ? (<div className="summary-panel">
+
                 <h2>Generated text</h2>
-                {/* Displays the generated summary text. */}
+
                 <p>{summarizedText}</p>
-              </div>
-            // Renders nothing when summarization was not requested.
-            ) : null}
-          </section>
-        // Renders nothing before audio has been generated.
-        ) : null}
+              </div>) : null}
+          </section>) : null}
+
+
+        <section className="history-section" aria-labelledby="history-title">
+
+          <div className="history-heading">
+
+            <h2 id="history-title">Recent Generations</h2>
+
+            <span>{audioJobs.length}</span>
+          </div>
+
+
+          {isLoadingHistory ? (<p className="history-state" role="status">
+              Loading recent generations
+            </p>) : null}
+
+
+          {historyError ? (<p className="history-error" role="alert">
+              {historyError}
+            </p>) : null}
+
+
+          {!isLoadingHistory && audioJobs.length === 0 ? (<p className="history-state">No generated audio yet.</p>) : (<div className="history-list">
+
+              {audioJobs.map((job) => {
+                const jobLanguage = languages.find((language) => language.code === job.language_code);
+                const jobVoice = jobLanguage?.voices.find((voiceOption) => voiceOption.id === job.voice);
+                const jobAudioUrl = job.audio_url
+                    ? buildAudioUrl(job.audio_url)
+                    : null;
+                const jobStatusText = job.status === 'failed'
+                    ? job.error ?? 'Generation failed'
+                    : job.status === 'cancel_requested'
+                        ? 'Cancelling'
+                        : job.status === 'cancelled'
+                            ? 'Cancelled'
+                            : job.status === 'queued' && job.queue_position
+                                ? `Queued · Position ${job.queue_position}`
+                                : job.status === 'generating'
+                                    ? `Generating · ${job.progress}%`
+                                    : job.status;
+                return (<article className="history-item" key={job.job_id}>
+
+                    <div className="history-summary">
+
+                      <h3>{job.text_preview}</h3>
+
+                      <p>
+                        {jobLanguage?.label ?? job.language_code}
+                        {' · '}
+                        {jobVoice?.label ?? job.voice}
+                        {' · '}
+                        {formatJobDate(job.created_at)}
+                      </p>
+                    </div>
+
+
+                    {job.status !== 'done' ? (<p className={`history-status history-status-${job.status}`}>
+                        {jobStatusText}
+                      </p>) : null}
+
+
+                    {job.status === 'generating' ? (<progress className="history-progress" aria-label={`Generation progress for ${job.text_preview}`} max={100} value={job.progress}/>) : null}
+
+
+                    {jobAudioUrl ? (<audio aria-label={`Generated audio for ${job.text_preview}`} controls preload="none" src={jobAudioUrl}/>) : null}
+
+
+                    {job.status === 'done'
+                        || job.status === 'failed'
+                        || job.status === 'cancelled'
+                        || isActiveAudioJobStatus(job.status) ? (<div className="history-actions">
+
+                        {job.status === 'done' ? (<a className="history-download" href={buildAudioJobDownloadUrl(job.job_id)}>
+                            Download
+                          </a>) : null}
+
+                        {isActiveAudioJobStatus(job.status) ? (<button className="history-delete" type="button" disabled={cancellingJobId === job.job_id
+                                || job.status === 'cancel_requested'} onClick={() => handleCancelJob(job.job_id)}>
+                            {cancellingJobId === job.job_id
+                                || job.status === 'cancel_requested'
+                                ? 'Cancelling'
+                                : 'Cancel'}
+                          </button>) : (<button className="history-delete" type="button" disabled={deletingJobId === job.job_id} onClick={() => handleDeleteJob(job)}>
+                            {deletingJobId === job.job_id ? 'Deleting' : 'Delete'}
+                          </button>)}
+                      </div>) : null}
+                  </article>);
+            })}
+            </div>)}
+        </section>
       </section>
-    </main>
-  );
+    </main>);
 }
