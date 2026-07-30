@@ -12,6 +12,12 @@ import soundfile as sf
 
 from kokoro import KPipeline
 
+from app.audio_formats import (
+    AUDIO_FORMAT_SPECS,
+    AudioFormat,
+    get_audio_format_spec,
+)
+
 
 AUDIO_DIR = Path(__file__).resolve().parent.parent / "audios"
 
@@ -24,12 +30,15 @@ class AudioGenerationCancelled(Exception):
     pass
 
 
-def build_audio_file_name(output_id: str) -> str:
+def build_audio_file_name(
+    output_id: str,
+    audio_format: AudioFormat = "wav",
+) -> str:
 
     if not output_id or not output_id.isalnum():
         raise ValueError("Audio output ID must be alphanumeric")
 
-    return f"{output_id}.wav"
+    return f"{output_id}.{get_audio_format_spec(audio_format).extension}"
 
 
 def delete_audio_file(file_name: str, audio_dir: Path = AUDIO_DIR) -> None:
@@ -50,15 +59,16 @@ def delete_expired_audio_files(
 
     cutoff_timestamp = cutoff.timestamp()
 
-    for file_path in audio_dir.glob("*.wav"):
-        try:
-            modified_at = file_path.stat().st_mtime
+    for audio_format in AUDIO_FORMAT_SPECS:
+        for file_path in audio_dir.glob(f"*.{audio_format}"):
+            try:
+                modified_at = file_path.stat().st_mtime
 
-        except FileNotFoundError:
-            continue
+            except FileNotFoundError:
+                continue
 
-        if modified_at < cutoff_timestamp:
-            file_path.unlink(missing_ok=True)
+            if modified_at < cutoff_timestamp:
+                file_path.unlink(missing_ok=True)
 
 
 def generate_audio_file(
@@ -67,6 +77,7 @@ def generate_audio_file(
     voice: str,
     output_id: str | None = None,
     progress_callback: Callable[[int], bool] | None = None,
+    audio_format: AudioFormat = "wav",
 ) -> str:
 
     return generate_segmented_audio_file(
@@ -75,6 +86,7 @@ def generate_audio_file(
         output_id=output_id,
         progress_callback=progress_callback,
         pause_seconds=0,
+        audio_format=audio_format,
     )
 
 
@@ -84,13 +96,16 @@ def generate_segmented_audio_file(
     output_id: str | None = None,
     progress_callback: Callable[[int], bool] | None = None,
     pause_seconds: float = PODCAST_SEGMENT_PAUSE_SECONDS,
+    audio_format: AudioFormat = "wav",
 ) -> str:
 
     AUDIO_DIR.mkdir(exist_ok=True)
 
     resolved_output_id = output_id or uuid4().hex
 
-    file_name = build_audio_file_name(resolved_output_id)
+    format_spec = get_audio_format_spec(audio_format)
+
+    file_name = build_audio_file_name(resolved_output_id, audio_format)
 
     output_path = AUDIO_DIR / file_name
 
@@ -115,7 +130,8 @@ def generate_segmented_audio_file(
             mode="w",
             samplerate=AUDIO_SAMPLE_RATE,
             channels=1,
-            format="WAV",
+            format=format_spec.soundfile_format,
+            subtype=format_spec.soundfile_subtype,
         ) as output_file:
             for segment_index, (text, voice) in enumerate(segments):
                 generator = pipeline(text, voice=voice)

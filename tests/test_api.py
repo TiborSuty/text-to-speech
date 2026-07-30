@@ -219,6 +219,7 @@ def test_approve_podcast_workflow_queues_idempotent_audio(monkeypatch):
         language_code="a",
         host_voice="af_heart",
         guest_voice="af_bella",
+        audio_format="mp3",
     )
 
     captured = {}
@@ -260,6 +261,7 @@ def test_approve_podcast_workflow_queues_idempotent_audio(monkeypatch):
         "af_bella",
     ]
     assert request.summarize is False
+    assert request.audio_format == "mp3"
 
 
 def test_audio_job_generates_multi_speaker_script(monkeypatch):
@@ -355,6 +357,21 @@ def test_create_audio_rejects_voice_language_mismatch():
     assert response.status_code == 422
 
     assert response.json()["detail"] == "Unsupported voice for selected language"
+
+
+def test_create_audio_rejects_unsupported_audio_format():
+
+    response = client.post(
+        "/api/audio",
+        json={
+            "text": "Hello",
+            "language_code": "a",
+            "summarize": False,
+            "audio_format": "aac",
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_create_audio_returns_audio_url(monkeypatch):
@@ -529,6 +546,7 @@ def test_audio_job_status_returns_completed_job(monkeypatch):
     assert job["language_code"] == "a"
     assert job["voice"] == "af_heart"
     assert job["summarize"] is False
+    assert job["audio_format"] == "wav"
     assert job["text_preview"] == "Hello world"
 
     assert job["created_at"]
@@ -657,13 +675,15 @@ def test_audio_job_history_download_and_delete_unique_file(monkeypatch):
         voice: str,
         output_id: str,
         progress_callback=None,
+        audio_format="wav",
     ) -> str:
 
         assert text == "Keep this episode"
         assert language_code == "b"
         assert voice == "bf_emma"
+        assert audio_format == "mp3"
 
-        file_name = f"{output_id}.wav"
+        file_name = f"{output_id}.mp3"
 
         (AUDIO_DIR / file_name).write_bytes(b"test-wave-data")
 
@@ -678,11 +698,12 @@ def test_audio_job_history_download_and_delete_unique_file(monkeypatch):
             "language_code": "b",
             "voice": "bf_emma",
             "summarize": False,
+            "audio_format": "mp3",
         },
     )
 
     job_id = create_response.json()["job_id"]
-    object_key = f"{job_id}.wav"
+    object_key = f"{job_id}.mp3"
 
     wait_for_job_status(job_id, {"done"})
 
@@ -696,23 +717,24 @@ def test_audio_job_history_download_and_delete_unique_file(monkeypatch):
     )
 
     assert history_job["status"] == "done"
-    assert history_job["audio_url"] == f"/api/audio-files/{job_id}.wav"
+    assert history_job["audio_url"] == f"/api/audio-files/{job_id}.mp3"
     assert history_job["language_code"] == "b"
     assert history_job["voice"] == "bf_emma"
+    assert history_job["audio_format"] == "mp3"
     assert history_job["text_preview"] == "Keep this episode"
 
     playback_response = client.get(history_job["audio_url"])
 
     assert playback_response.status_code == 200
-    assert playback_response.headers["content-type"] == "audio/wav"
+    assert playback_response.headers["content-type"] == "audio/mpeg"
     assert playback_response.content == b"test-wave-data"
 
     download_response = client.get(f"/api/audio-jobs/{job_id}/download")
 
     assert download_response.status_code == 200
-    assert download_response.headers["content-type"] == "audio/wav"
+    assert download_response.headers["content-type"] == "audio/mpeg"
     assert (
-        f'filename="{job_id}.wav"' in download_response.headers["content-disposition"]
+        f'filename="{job_id}.mp3"' in download_response.headers["content-disposition"]
     )
     assert download_response.content == b"test-wave-data"
 

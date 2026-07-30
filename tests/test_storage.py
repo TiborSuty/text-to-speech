@@ -77,7 +77,7 @@ def test_minio_audio_storage_upload_and_presigned_download(monkeypatch, tmp_path
             response_headers,
         ) -> str:
             assert bucket == "audio"
-            assert response_headers["response-content-type"] == "audio/wav"
+            assert response_headers["response-content-type"] == "audio/mpeg"
             assert "attachment" in response_headers["response-content-disposition"]
             return f"http://{self.endpoint}/{bucket}/{object_key}?signed=true"
 
@@ -92,14 +92,14 @@ def test_minio_audio_storage_upload_and_presigned_download(monkeypatch, tmp_path
         region="us-east-1",
     )
 
-    source_path = tmp_path / "job123.wav"
-    source_path.write_bytes(b"wave-data")
+    source_path = tmp_path / "job123.mp3"
+    source_path.write_bytes(b"mp3-data")
 
     storage.initialize()
-    storage.put_file(source_path, "job123.wav")
-    assert storage.exists("job123.wav") is True
-    signed_url = storage.presigned_get_url("job123.wav", "job123.wav")
-    storage.delete("job123.wav")
+    storage.put_file(source_path, "job123.mp3")
+    assert storage.exists("job123.mp3") is True
+    signed_url = storage.presigned_get_url("job123.mp3", "job123.mp3")
+    storage.delete("job123.mp3")
 
     assert [client.endpoint for client in created_clients] == [
         "minio:9000",
@@ -107,17 +107,33 @@ def test_minio_audio_storage_upload_and_presigned_download(monkeypatch, tmp_path
     ]
     assert created_clients[0].upload == (
         "audio",
-        "job123.wav",
+        "job123.mp3",
         str(source_path),
-        "audio/wav",
+        "audio/mpeg",
     )
-    assert signed_url == "http://127.0.0.1:9000/audio/job123.wav?signed=true"
-    assert created_clients[0].removed == ("audio", "job123.wav")
+    assert signed_url == "http://127.0.0.1:9000/audio/job123.mp3?signed=true"
+    assert created_clients[0].removed == ("audio", "job123.mp3")
 
 
 def test_audio_object_key_rejects_paths():
 
     import pytest
 
-    with pytest.raises(ValueError, match="plain WAV"):
+    with pytest.raises(ValueError, match="plain file"):
         validate_audio_object_key("../job123.wav")
+
+
+def test_audio_object_key_accepts_supported_formats():
+
+    assert validate_audio_object_key("job123.wav") == "job123.wav"
+    assert validate_audio_object_key("job123.mp3") == "job123.mp3"
+    assert validate_audio_object_key("job123.flac") == "job123.flac"
+    assert validate_audio_object_key("job123.ogg") == "job123.ogg"
+
+
+def test_audio_object_key_rejects_unsupported_formats():
+
+    import pytest
+
+    with pytest.raises(ValueError, match="Unsupported audio"):
+        validate_audio_object_key("job123.aac")

@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 import { buildAudioJobDownloadUrl, buildAudioJobEventsUrl, buildAudioUrl, approvePodcastWorkflow, cancelAudioJob, createAudioJob, deleteAudioJob, fetchAppConfig, fetchAudioJobs, fetchLanguages, fetchPodcastWorkflow, startPodcastWorkflow, } from './api';
-import type { AudioJobStatus, AudioJobStatusResponse, AudioSegment, LanguageOption, PodcastDuration, PodcastFormat, PodcastScript, PodcastScriptSegment, } from './types';
+import type { AudioFormat, AudioJobStatus, AudioJobStatusResponse, AudioSegment, LanguageOption, PodcastDuration, PodcastFormat, PodcastScript, PodcastScriptSegment, } from './types';
 function getInitialLanguage(languages: LanguageOption[]): LanguageOption | null {
     return languages.find((language) => language.code === 'a') ?? languages[0] ?? null;
 }
@@ -92,6 +92,7 @@ export default function App() {
     const [voice, setVoice] = useState('');
     const [text, setText] = useState('');
     const [summarize, setSummarize] = useState(false);
+    const [audioFormat, setAudioFormat] = useState<AudioFormat>('wav');
     const [podcastFormat, setPodcastFormat] = useState<PodcastFormat>('interview');
     const [podcastDuration, setPodcastDuration] = useState<PodcastDuration>('short');
     const [guestVoice, setGuestVoice] = useState('');
@@ -377,12 +378,14 @@ export default function App() {
                     language_code: languageCode,
                     host_voice: voice,
                     guest_voice: guestVoice,
+                    audio_format: audioFormat,
                 })
                 : await createAudioJob({
                     text: trimmedText,
                     language_code: languageCode,
                     voice,
                     summarize,
+                    audio_format: audioFormat,
                 });
             if (creationMode === 'podcast') {
                 window.localStorage.removeItem(PENDING_PODCAST_WORKFLOW_KEY);
@@ -628,6 +631,18 @@ export default function App() {
               </label>) : null}
           </div>
 
+          <label className="field">
+
+            <span>Audio format</span>
+
+            <select id="audio-format" name="audio-format" value={audioFormat} onChange={(event) => setAudioFormat(event.target.value as AudioFormat)} disabled={isGenerating || isGeneratingScript}>
+              <option value="wav">WAV · Uncompressed</option>
+              <option value="mp3">MP3 · Smaller file</option>
+              <option value="flac">FLAC · Lossless</option>
+              <option value="ogg">OGG · Vorbis</option>
+            </select>
+          </label>
+
 
           <label className="field">
 
@@ -856,6 +871,8 @@ export default function App() {
                         {jobLanguage?.label ?? job.language_code}
                         {' · '}
                         {jobVoice?.label ?? job.voice}
+                        {' · '}
+                        {(job.audio_format ?? 'wav').toUpperCase()}
                         {' · '}
                         {formatJobDate(job.created_at)}
                       </p>

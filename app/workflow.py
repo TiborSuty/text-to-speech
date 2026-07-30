@@ -63,6 +63,8 @@ class PodcastWorkflowState(TypedDict, total=False):
 
     guest_voice: str
 
+    audio_format: str
+
     audio_job_id: str
 
 
@@ -342,6 +344,7 @@ def build_podcast_workflow(
             "language_code": validated_approval.language_code,
             "host_voice": validated_approval.host_voice,
             "guest_voice": validated_approval.guest_voice,
+            "audio_format": validated_approval.audio_format,
             "status": "approved",
         }
 
@@ -522,6 +525,7 @@ def get_podcast_workflow_approval(
         language_code=state["language_code"],
         host_voice=state["host_voice"],
         guest_voice=state["guest_voice"],
+        audio_format=state.get("audio_format", "wav"),
     )
 
 

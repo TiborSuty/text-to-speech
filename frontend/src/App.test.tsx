@@ -71,6 +71,7 @@ function createAudioJobStatus(overrides: Partial<AudioJobStatusResponse> = {}): 
         language_code: 'a',
         voice: 'af_heart',
         summarize: false,
+        audio_format: 'wav',
         text_preview: 'Hello world',
         created_at: '2026-07-28T12:00:00Z',
         updated_at: '2026-07-28T12:01:00Z',
@@ -163,6 +164,7 @@ describe('App', () => {
         const user = userEvent.setup();
         render(<App />);
         await user.selectOptions(await screen.findByLabelText(/select a voice/i), 'af_bella');
+        await user.selectOptions(screen.getByLabelText(/audio format/i), 'mp3');
         await user.type(await screen.findByLabelText(/enter text/i), 'Hello world');
         await user.click(screen.getByRole('button', { name: /generate audio/i }));
         await waitFor(() => {
@@ -171,6 +173,7 @@ describe('App', () => {
                 language_code: 'a',
                 voice: 'af_bella',
                 summarize: false,
+                audio_format: 'mp3',
             });
         });
         await waitFor(() => {
@@ -180,12 +183,13 @@ describe('App', () => {
             MockEventSource.instances[0].emit(createAudioJobStatus({
                 job_id: 'job-123',
                 status: 'done',
-                audio_url: '/audios/job-123.wav',
+                audio_format: 'mp3',
+                audio_url: '/audios/job-123.mp3',
                 summarized_text: null,
                 error: null,
             }));
         });
-        expect(await screen.findByLabelText('Generated audio', { exact: true })).toHaveAttribute('src', 'http://127.0.0.1:8000/audios/job-123.wav');
+        expect(await screen.findByLabelText('Generated audio', { exact: true })).toHaveAttribute('src', 'http://127.0.0.1:8000/audios/job-123.mp3');
     });
     it('announces when generated audio is ready', async () => {
         const user = userEvent.setup();
@@ -354,6 +358,7 @@ describe('App', () => {
                 language_code: 'a',
                 host_voice: 'af_heart',
                 guest_voice: 'af_bella',
+                audio_format: 'wav',
             });
         });
         expect(createAudioJob).not.toHaveBeenCalled();

@@ -16,6 +16,10 @@ from minio.error import S3Error
 
 
 from app.audio import AUDIO_DIR
+from app.audio_formats import (
+    get_audio_format_from_file_name,
+    get_audio_format_spec,
+)
 
 
 DEFAULT_AUDIO_BUCKET = "audio"
@@ -43,10 +47,12 @@ class AudioObjectStorage(Protocol):
 
 def validate_audio_object_key(object_key: str) -> str:
 
-    if Path(object_key).name != object_key or not object_key.endswith(".wav"):
-        raise ValueError("Audio object key must be a plain WAV file name")
+    if Path(object_key).name != object_key:
+        raise ValueError("Audio object key must be a plain file name")
 
-    if not object_key.removesuffix(".wav").isalnum():
+    audio_format = get_audio_format_from_file_name(object_key)
+
+    if not object_key.removesuffix(f".{audio_format}").isalnum():
         raise ValueError("Audio object key must use an alphanumeric identifier")
 
     return object_key
@@ -169,6 +175,7 @@ class MinioAudioStorage:
     def put_file(self, source_path: Path, object_key: str) -> None:
 
         key = validate_audio_object_key(object_key)
+        audio_format = get_audio_format_from_file_name(key)
 
         self.initialize()
 
@@ -176,7 +183,7 @@ class MinioAudioStorage:
             self.bucket,
             key,
             str(source_path),
-            content_type="audio/wav",
+            content_type=get_audio_format_spec(audio_format).media_type,
         )
 
     def exists(self, object_key: str) -> bool:
@@ -213,7 +220,12 @@ class MinioAudioStorage:
         download_filename: str | None = None,
     ) -> str:
 
-        response_headers = {"response-content-type": "audio/wav"}
+        key = validate_audio_object_key(object_key)
+        audio_format = get_audio_format_from_file_name(key)
+
+        response_headers = {
+            "response-content-type": get_audio_format_spec(audio_format).media_type
+        }
 
         if download_filename is not None:
             response_headers["response-content-disposition"] = (
@@ -222,7 +234,7 @@ class MinioAudioStorage:
 
         return self.public_client.presigned_get_object(
             self.bucket,
-            validate_audio_object_key(object_key),
+            key,
             expires=PRESIGNED_URL_EXPIRY,
             response_headers=response_headers,
         )

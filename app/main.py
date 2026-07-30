@@ -4,16 +4,16 @@ from contextlib import asynccontextmanager
 
 import json
 
-import os
-
 from collections.abc import AsyncIterator
+
+from typing import Annotated
 
 from datetime import UTC, datetime, timedelta
 
 from threading import Lock
 
 
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Response
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -28,6 +28,12 @@ from app.audio import (
     generate_audio_file,
     generate_segmented_audio_file,
 )
+from app.audio_formats import (
+    get_audio_format_from_file_name,
+    get_audio_format_spec,
+)
+
+from app.config import AppSettings, settings
 
 from app.jobs import (
     TERMINAL_JOB_STATUSES,
@@ -63,7 +69,6 @@ from app.models import (
     AudioJobStatusResponse,
     AudioRequest,
     AudioResponse,
-    AudioSegment,
     HealthResponse,
     LanguageOption,
     PodcastScriptRequest,
@@ -71,6 +76,9 @@ from app.models import (
     PodcastWorkflowApprovalRequest,
     PodcastWorkflowResponse,
 )
+
+from app.services.audio_generation import AudioGenerationService
+from app.services.podcast import build_podcast_audio_request
 
 from app.text import (
     PodcastScriptError,
@@ -96,9 +104,13 @@ from app.workflow import (
 
 audio_storage = create_audio_object_storage()
 
+api_router = APIRouter(prefix="/api")
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+
+    AUDIO_DIR.mkdir(exist_ok=True)
 
     initialize_audio_job_store()
 
@@ -119,44 +131,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         audio_worker_pool.shutdown()
 
 
-app = FastAPI(title="AI Podcaster API", lifespan=lifespan)
-
-
-DEFAULT_AUDIO_RETENTION_HOURS = 168.0
-
-
-def get_audio_retention_hours() -> float:
-
-    try:
-        return float(
-            os.getenv(
-                "AUDIO_RETENTION_HOURS",
-                str(DEFAULT_AUDIO_RETENTION_HOURS),
-            )
-        )
-
-    except ValueError:
-        return DEFAULT_AUDIO_RETENTION_HOURS
-
-
-AUDIO_RETENTION_HOURS = get_audio_retention_hours()
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-AUDIO_DIR.mkdir(exist_ok=True)
+AUDIO_RETENTION_HOURS = settings.audio_retention_hours
 
 
 def audio_job_to_response(job: AudioJob) -> AudioJobStatusResponse:
@@ -173,6 +148,7 @@ def audio_job_to_response(job: AudioJob) -> AudioJobStatusResponse:
         language_code=job.language_code,
         voice=job.voice,
         summarize=job.summarize,
+        audio_format=job.audio_format,
         text_preview=job.text_preview,
         created_at=job.created_at,
         updated_at=job.updated_at,
@@ -275,6 +251,20 @@ def resolve_audio_voice(request: AudioRequest) -> str:
     return voice
 
 
+def get_audio_generation_service() -> AudioGenerationService:
+    return AudioGenerationService(
+        summarize_text=summarize_text,
+        generate_audio_file=generate_audio_file,
+        generate_segmented_audio_file=generate_segmented_audio_file,
+    )
+
+
+AudioGenerationServiceDependency = Annotated[
+    AudioGenerationService,
+    Depends(get_audio_generation_service),
+]
+
+
 def finish_audio_job_cancellation(
     job_id: str,
     file_name: str | None = None,
@@ -304,9 +294,7 @@ def finish_audio_job_cancellation(
 
 def run_audio_job(job_id: str, request: AudioRequest, voice: str) -> None:
 
-    text_for_audio = request.text
-
-    summarized_text = None
+    service = get_audio_generation_service()
 
     file_name = None
     object_key = None
@@ -320,12 +308,10 @@ def run_audio_job(job_id: str, request: AudioRequest, voice: str) -> None:
                 finish_audio_job_cancellation(job_id)
                 return
 
-            summarized_text = summarize_text(request.text)
+        prepared_audio = service.prepare(request)
 
-            text_for_audio = summarized_text
-
-            if finish_audio_job_cancellation(job_id):
-                return
+        if request.summarize and finish_audio_job_cancellation(job_id):
+            return
 
         if not update_audio_job_status(job_id, "generating"):
             finish_audio_job_cancellation(job_id)
@@ -335,21 +321,13 @@ def run_audio_job(job_id: str, request: AudioRequest, voice: str) -> None:
 
             return update_audio_job_progress(job_id, progress)
 
-        if request.segments:
-            file_name = generate_segmented_audio_file(
-                [(segment.text, segment.voice) for segment in request.segments],
-                request.language_code,
-                job_id,
-                progress_callback=report_audio_progress,
-            )
-        else:
-            file_name = generate_audio_file(
-                text_for_audio,
-                request.language_code,
-                voice,
-                job_id,
-                progress_callback=report_audio_progress,
-            )
+        file_name = service.render(
+            request,
+            voice,
+            text=prepared_audio.text,
+            output_id=job_id,
+            progress_callback=report_audio_progress,
+        )
 
         if finish_audio_job_cancellation(job_id, file_name=file_name):
             return
@@ -359,7 +337,11 @@ def run_audio_job(job_id: str, request: AudioRequest, voice: str) -> None:
         if finish_audio_job_cancellation(job_id, object_key=object_key):
             return
 
-        if not complete_audio_job_record(job_id, object_key, summarized_text):
+        if not complete_audio_job_record(
+            job_id,
+            object_key,
+            prepared_audio.summarized_text,
+        ):
             finish_audio_job_cancellation(job_id, object_key=object_key)
 
     except SummarizationError as exc:
@@ -417,25 +399,25 @@ async def stream_audio_job_events(job_id: str) -> AsyncIterator[str]:
         await asyncio.sleep(0.25)
 
 
-@app.get("/api/health", response_model=HealthResponse)
+@api_router.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
 
     return HealthResponse(status="ok")
 
 
-@app.get("/api/config", response_model=AppConfigResponse)
+@api_router.get("/config", response_model=AppConfigResponse)
 def get_app_config() -> AppConfigResponse:
 
     return AppConfigResponse(max_text_characters=AUDIO_MAX_TEXT_CHARACTERS)
 
 
-@app.get("/api/languages", response_model=list[LanguageOption])
+@api_router.get("/languages", response_model=list[LanguageOption])
 def get_languages() -> list[dict[str, object]]:
 
     return SUPPORTED_LANGUAGES
 
 
-@app.post("/api/podcast-scripts", response_model=PodcastScriptResponse)
+@api_router.post("/podcast-scripts", response_model=PodcastScriptResponse)
 def generate_podcast_script(
     request: PodcastScriptRequest,
 ) -> PodcastScriptResponse:
@@ -447,7 +429,7 @@ def generate_podcast_script(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@app.post("/api/podcast-workflows", response_model=PodcastWorkflowResponse)
+@api_router.post("/podcast-workflows", response_model=PodcastWorkflowResponse)
 def create_podcast_workflow(
     request: PodcastScriptRequest,
 ) -> PodcastWorkflowResponse:
@@ -459,8 +441,8 @@ def create_podcast_workflow(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@app.get(
-    "/api/podcast-workflows/{workflow_id}",
+@api_router.get(
+    "/podcast-workflows/{workflow_id}",
     response_model=PodcastWorkflowResponse,
 )
 def read_podcast_workflow(workflow_id: str) -> PodcastWorkflowResponse:
@@ -494,6 +476,7 @@ def enqueue_audio_job(
             voice=voice,
             text=request.text,
             summarize=request.summarize,
+            audio_format=request.audio_format,
             job_id=job_id,
         )
 
@@ -508,8 +491,8 @@ def enqueue_audio_job(
         return AudioJobCreateResponse(job_id=job.job_id)
 
 
-@app.post(
-    "/api/podcast-workflows/{workflow_id}/approve",
+@api_router.post(
+    "/podcast-workflows/{workflow_id}/approve",
     response_model=AudioJobCreateResponse,
     status_code=202,
 )
@@ -518,24 +501,7 @@ def approve_and_create_podcast_audio(
     approval: PodcastWorkflowApprovalRequest,
 ) -> AudioJobCreateResponse:
 
-    preview_request = AudioRequest(
-        text="\n\n".join(segment.text for segment in approval.script.segments),
-        language_code=approval.language_code,
-        voice=approval.host_voice,
-        summarize=False,
-        segments=[
-            AudioSegment(
-                speaker=segment.speaker,
-                text=segment.text,
-                voice=(
-                    approval.host_voice
-                    if segment.speaker == "host"
-                    else approval.guest_voice
-                ),
-            )
-            for segment in approval.script.segments
-        ],
-    )
+    preview_request = build_podcast_audio_request(approval)
 
     resolve_audio_voice(preview_request)
 
@@ -550,26 +516,7 @@ def approve_and_create_podcast_audio(
     except PodcastWorkflowError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    audio_request = AudioRequest(
-        text="\n\n".join(
-            segment.text for segment in persisted_approval.script.segments
-        ),
-        language_code=persisted_approval.language_code,
-        voice=persisted_approval.host_voice,
-        summarize=False,
-        segments=[
-            AudioSegment(
-                speaker=segment.speaker,
-                text=segment.text,
-                voice=(
-                    persisted_approval.host_voice
-                    if segment.speaker == "host"
-                    else persisted_approval.guest_voice
-                ),
-            )
-            for segment in persisted_approval.script.segments
-        ],
-    )
+    audio_request = build_podcast_audio_request(persisted_approval)
 
     response = enqueue_audio_job(audio_request, job_id=workflow_id)
 
@@ -582,7 +529,11 @@ def approve_and_create_podcast_audio(
     return response
 
 
-@app.post("/api/audio-jobs", response_model=AudioJobCreateResponse, status_code=202)
+@api_router.post(
+    "/audio-jobs",
+    response_model=AudioJobCreateResponse,
+    status_code=202,
+)
 def create_audio_job(
     request: AudioRequest,
 ) -> AudioJobCreateResponse:
@@ -590,7 +541,7 @@ def create_audio_job(
     return enqueue_audio_job(request)
 
 
-@app.get("/api/audio-jobs", response_model=list[AudioJobStatusResponse])
+@api_router.get("/audio-jobs", response_model=list[AudioJobStatusResponse])
 def get_audio_jobs(
     limit: int = Query(default=20, ge=1, le=100),
 ) -> list[AudioJobStatusResponse]:
@@ -600,7 +551,10 @@ def get_audio_jobs(
     return [audio_job_to_response(job) for job in list_audio_job_records(limit)]
 
 
-@app.get("/api/audio-jobs/{job_id}", response_model=AudioJobStatusResponse)
+@api_router.get(
+    "/audio-jobs/{job_id}",
+    response_model=AudioJobStatusResponse,
+)
 def get_audio_job(job_id: str) -> AudioJobStatusResponse:
 
     job = get_existing_audio_job(job_id)
@@ -608,8 +562,8 @@ def get_audio_job(job_id: str) -> AudioJobStatusResponse:
     return audio_job_to_response(job)
 
 
-@app.post(
-    "/api/audio-jobs/{job_id}/cancel",
+@api_router.post(
+    "/audio-jobs/{job_id}/cancel",
     response_model=AudioJobStatusResponse,
 )
 def cancel_audio_job(job_id: str) -> AudioJobStatusResponse:
@@ -647,18 +601,20 @@ def build_audio_object_response(
 
     return FileResponse(
         path=file_path,
-        media_type="audio/wav",
+        media_type=get_audio_format_spec(
+            get_audio_format_from_file_name(object_key)
+        ).media_type,
         filename=download_filename,
     )
 
 
-@app.get("/api/audio-files/{object_key}")
+@api_router.get("/audio-files/{object_key}")
 def play_audio_file(object_key: str) -> Response:
 
     return build_audio_object_response(object_key)
 
 
-@app.get("/api/audio-jobs/{job_id}/download")
+@api_router.get("/audio-jobs/{job_id}/download")
 def download_audio_job(job_id: str) -> Response:
 
     job = get_existing_audio_job(job_id)
@@ -672,7 +628,7 @@ def download_audio_job(job_id: str) -> Response:
     )
 
 
-@app.get("/api/audio-jobs/{job_id}/events")
+@api_router.get("/audio-jobs/{job_id}/events")
 def get_audio_job_events(job_id: str) -> StreamingResponse:
 
     get_existing_audio_job(job_id)
@@ -687,7 +643,7 @@ def get_audio_job_events(job_id: str) -> StreamingResponse:
     )
 
 
-@app.delete("/api/audio-jobs/{job_id}", status_code=204)
+@api_router.delete("/audio-jobs/{job_id}", status_code=204)
 def delete_audio_job(job_id: str) -> Response:
 
     job = get_existing_audio_job(job_id)
@@ -707,32 +663,21 @@ def delete_audio_job(job_id: str) -> Response:
     return Response(status_code=204)
 
 
-@app.post("/api/audio", response_model=AudioResponse)
-def create_audio(request: AudioRequest) -> AudioResponse:
+@api_router.post("/audio", response_model=AudioResponse)
+def create_audio(
+    request: AudioRequest,
+    service: AudioGenerationServiceDependency,
+) -> AudioResponse:
 
     voice = resolve_audio_voice(request)
 
-    text_for_audio = request.text
-
-    summarized_text = None
-
     try:
-        if request.summarize:
-            summarized_text = summarize_text(request.text)
-
-            text_for_audio = summarized_text
-
-        if request.segments:
-            file_name = generate_segmented_audio_file(
-                [(segment.text, segment.voice) for segment in request.segments],
-                request.language_code,
-            )
-        else:
-            file_name = generate_audio_file(
-                text_for_audio,
-                request.language_code,
-                voice,
-            )
+        prepared_audio = service.prepare(request)
+        file_name = service.render(
+            request,
+            voice,
+            text=prepared_audio.text,
+        )
 
         object_key = store_generated_audio_file(file_name)
 
@@ -750,5 +695,25 @@ def create_audio(request: AudioRequest) -> AudioResponse:
 
     return AudioResponse(
         audio_url=f"/api/audio-files/{object_key}",
-        summarized_text=summarized_text,
+        summarized_text=prepared_audio.summarized_text,
     )
+
+
+def create_app(app_settings: AppSettings = settings) -> FastAPI:
+    application = FastAPI(
+        title=app_settings.name,
+        version=app_settings.version,
+        lifespan=lifespan,
+    )
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(app_settings.cors_origins),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    application.include_router(api_router)
+    return application
+
+
+app = create_app()

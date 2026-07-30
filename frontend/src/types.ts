@@ -11,6 +11,7 @@ export type LanguageOption = {
 export type AppConfig = {
     max_text_characters: number;
 };
+export type AudioFormat = 'wav' | 'mp3' | 'flac' | 'ogg';
 export type PodcastFormat = 'narration' | 'interview' | 'explainer';
 export type PodcastDuration = 'short' | 'medium' | 'long';
 export type PodcastSpeaker = 'host' | 'guest';
@@ -41,6 +42,7 @@ export type PodcastWorkflowApproval = {
     language_code: string;
     host_voice: string;
     guest_voice: string;
+    audio_format: AudioFormat;
 };
 export type AudioSegment = PodcastScriptSegment & {
     voice: string;
@@ -50,6 +52,7 @@ export type AudioRequest = {
     language_code: string;
     voice: string;
     summarize: boolean;
+    audio_format: AudioFormat;
     segments?: AudioSegment[];
 };
 export type AudioResponse = {
@@ -68,6 +71,7 @@ export type AudioJobStatusResponse = {
     language_code: string;
     voice: string;
     summarize: boolean;
+    audio_format: AudioFormat;
     text_preview: string;
     created_at: string;
     updated_at: string;

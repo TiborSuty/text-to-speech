@@ -81,6 +81,51 @@ def test_generate_audio_file_rejects_unsafe_output_id():
         audio.generate_audio_file("Hello", "a", "af_heart", "../outside")
 
 
+@pytest.mark.parametrize(
+    ("audio_format", "expected_extension", "expected_container"),
+    [
+        ("wav", "wav", "WAV"),
+        ("mp3", "mp3", "MP3"),
+        ("flac", "flac", "FLAC"),
+        ("ogg", "ogg", "OGG"),
+    ],
+)
+def test_generate_audio_file_supports_multiple_formats(
+    monkeypatch,
+    tmp_path,
+    audio_format,
+    expected_extension,
+    expected_container,
+):
+
+    class FakePipeline:
+        def __init__(self, lang_code: str):
+            assert lang_code == "a"
+
+        def __call__(self, text: str, voice: str):
+            assert text == "Hello"
+            assert voice == "af_heart"
+            yield text, None, np.sin(
+                np.linspace(0, 20 * np.pi, audio.AUDIO_SAMPLE_RATE)
+            ).astype(np.float32)
+
+    monkeypatch.setattr(audio, "AUDIO_DIR", tmp_path)
+    monkeypatch.setattr(audio, "KPipeline", FakePipeline)
+
+    file_name = audio.generate_audio_file(
+        "Hello",
+        "a",
+        "af_heart",
+        "formatjob",
+        audio_format=audio_format,
+    )
+
+    assert file_name == f"formatjob.{expected_extension}"
+    file_info = audio.sf.info(tmp_path / file_name)
+    assert file_info.format == expected_container
+    assert file_info.samplerate == audio.AUDIO_SAMPLE_RATE
+
+
 def test_generate_segmented_audio_file_joins_speaker_turns(monkeypatch, tmp_path):
 
     rendered_segments: list[tuple[str, str]] = []

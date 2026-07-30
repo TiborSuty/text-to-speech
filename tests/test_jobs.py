@@ -69,10 +69,11 @@ def test_job_metadata_persists_across_repository_reinitialization(
         voice="af_heart",
         text="Persistent episode",
         summarize=True,
+        audio_format="flac",
     )
     complete_audio_job_record(
         created_job.job_id,
-        f"{created_job.job_id}.wav",
+        f"{created_job.job_id}.flac",
         "Persistent summary",
     )
 
@@ -83,8 +84,9 @@ def test_job_metadata_persists_across_repository_reinitialization(
 
     assert persisted_job is not None
     assert persisted_job.status == "done"
-    assert persisted_job.object_key == f"{created_job.job_id}.wav"
-    assert persisted_job.audio_url == f"/api/audio-files/{created_job.job_id}.wav"
+    assert persisted_job.object_key == f"{created_job.job_id}.flac"
+    assert persisted_job.audio_url == f"/api/audio-files/{created_job.job_id}.flac"
+    assert persisted_job.audio_format == "flac"
     assert persisted_job.summarized_text == "Persistent summary"
     assert persisted_job.progress == 100
 
@@ -338,6 +340,76 @@ def test_version_two_database_migrates_to_progress_schema(monkeypatch, tmp_path)
     assert migrated_job is not None
     assert migrated_job.status == "done"
     assert migrated_job.progress == 100
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (
+            DATABASE_SCHEMA_VERSION
+        )
+
+
+def test_version_three_database_migrates_to_audio_format_schema(
+    monkeypatch,
+    tmp_path,
+):
+
+    import sqlite3
+
+    from app import jobs
+
+    database_path = tmp_path / "version-three" / "audio_jobs.db"
+    database_path.parent.mkdir()
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE audio_jobs (
+                job_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                language_code TEXT NOT NULL,
+                voice TEXT NOT NULL,
+                summarize INTEGER NOT NULL,
+                text_preview TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                object_key TEXT,
+                summarized_text TEXT,
+                error TEXT,
+                progress INTEGER NOT NULL DEFAULT 0
+            );
+            PRAGMA user_version = 3;
+            """
+        )
+
+        timestamp = datetime.now(UTC).isoformat()
+        connection.execute(
+            """
+            INSERT INTO audio_jobs (
+                job_id,
+                status,
+                language_code,
+                voice,
+                summarize,
+                text_preview,
+                created_at,
+                updated_at,
+                object_key,
+                progress
+            ) VALUES (?, 'done', 'a', 'af_heart', 0, ?, ?, ?, ?, 100)
+            """,
+            (
+                "versionthreejob",
+                "Version three job",
+                timestamp,
+                timestamp,
+                "versionthreejob.wav",
+            ),
+        )
+
+    monkeypatch.setattr(jobs, "DATABASE_PATH", database_path)
+    jobs._initialized_database_paths.discard(database_path.resolve())
+    initialize_audio_job_store()
+    migrated_job = get_audio_job_record("versionthreejob")
+
+    assert migrated_job is not None
+    assert migrated_job.audio_format == "wav"
     with sqlite3.connect(database_path) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == (
             DATABASE_SCHEMA_VERSION

@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.audio_formats import AudioFormat
+
 
 DEFAULT_AUDIO_MAX_TEXT_CHARACTERS = 50_000
 
@@ -153,6 +155,8 @@ class PodcastWorkflowApprovalRequest(BaseModel):
 
     guest_voice: str = Field(min_length=1)
 
+    audio_format: AudioFormat = "wav"
+
     @field_validator("language_code", "host_voice", "guest_voice")
     @classmethod
     def trim_audio_identifier(cls, value: str) -> str:
@@ -178,6 +182,8 @@ class AudioRequest(BaseModel):
     voice: str | None = Field(default=None, min_length=1)
 
     summarize: bool = False
+
+    audio_format: AudioFormat = "wav"
 
     segments: list[AudioSegment] | None = Field(
         default=None,
@@ -246,6 +252,8 @@ class AudioJobStatusResponse(BaseModel):
     voice: str
 
     summarize: bool
+
+    audio_format: AudioFormat
 
     text_preview: str
 

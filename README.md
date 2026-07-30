@@ -2,7 +2,7 @@
 
 AI Podcaster turns text into generated speech with Kokoro. It supports language-compatible voice selection and can optionally summarize the input text with a local Ollama model before generating audio.
 
-Podcast Director adds a durable LangGraph studio workflow. It extracts source facts, drafts a schema-validated narration, interview, or explainer, checks the script against the source, and makes at most two automatic corrections. LangGraph then pauses at a persisted human-review interrupt. The approved title and host/guest turns remain editable before the existing queue and Kokoro renderer create one continuous WAV.
+Podcast Director adds a durable LangGraph studio workflow. It extracts source facts, drafts a schema-validated narration, interview, or explainer, checks the script against the source, and makes at most two automatic corrections. LangGraph then pauses at a persisted human-review interrupt. The approved title and host/guest turns remain editable before the existing queue and Kokoro renderer create one continuous audio file.
 
 ## Requirements
 
@@ -40,7 +40,7 @@ The response includes a `workflow_id`, editable `script`, extracted `facts`, rem
 ```bash
 curl -X POST http://127.0.0.1:8000/api/podcast-workflows/WORKFLOW_ID/approve \
   -H "Content-Type: application/json" \
-  -d '{"script":{"title":"Inside SQLite","segments":[{"speaker":"host","text":"Where does SQLite run?"},{"speaker":"guest","text":"Inside the application process."}]},"language_code":"a","host_voice":"af_heart","guest_voice":"af_bella"}'
+  -d '{"script":{"title":"Inside SQLite","segments":[{"speaker":"host","text":"Where does SQLite run?"},{"speaker":"guest","text":"Inside the application process."}]},"language_code":"a","host_voice":"af_heart","guest_voice":"af_bella","audio_format":"mp3"}'
 ```
 
 Approval returns a normal `job_id`, which uses the workflow ID as an idempotency key. Repeating approval recovers the same audio job instead of duplicating it. `GET /api/podcast-workflows/{workflow_id}` recovers the latest workflow checkpoint after a client or server restart.
@@ -52,10 +52,10 @@ Async audio generation uses a job endpoint plus Server-Sent Events:
 ```bash
 curl -X POST http://127.0.0.1:8000/api/audio-jobs \
   -H "Content-Type: application/json" \
-  -d '{"text":"Hello world","language_code":"a","voice":"af_heart","summarize":false}'
+  -d '{"text":"Hello world","language_code":"a","voice":"af_heart","summarize":false,"audio_format":"mp3"}'
 ```
 
-The response contains a `job_id`. The frontend then listens to:
+Supported audio formats are `wav`, `mp3`, `flac`, and `ogg`. The `audio_format` field defaults to `wav` when omitted, preserving compatibility with existing API clients. The response contains a `job_id`. The frontend then listens to:
 
 ```text
 /api/audio-jobs/{job_id}/events
@@ -78,9 +78,9 @@ Job metadata is persisted in SQLite at `data/audio_jobs.db` by default. Complete
 
 Async generation runs through a bounded FIFO worker queue. Waiting jobs include a one-based `queue_position` in API and SSE responses. Set `AUDIO_WORKER_COUNT` to control concurrency; it defaults to `1` and is clamped between `1` and `8` to keep model memory bounded.
 
-Kokoro output is written incrementally to a hidden job-specific WAV rather than accumulated in memory. Each completed model chunk persists a monotonic `progress` percentage and sends it through SSE; `100` is reserved for audio that has been published successfully to object storage.
+Kokoro output is written incrementally to a hidden job-specific audio file rather than accumulated in memory. Each completed model chunk persists a monotonic `progress` percentage and sends it through SSE; `100` is reserved for audio that has been published successfully to object storage.
 
-Cancellation is immediate for queued work. Running summarization remains blocking, so cancellation during that stage takes effect when Ollama returns. During Kokoro generation, cancellation is checked between chunks, the hidden partial WAV is deleted, and no filesystem or MinIO object is published.
+Cancellation is immediate for queued work. Running summarization remains blocking, so cancellation during that stage takes effect when Ollama returns. During Kokoro generation, cancellation is checked between chunks, the hidden partial audio file is deleted, and no filesystem or MinIO object is published.
 
 Text input defaults to a maximum of 50,000 characters. Set `AUDIO_MAX_TEXT_CHARACTERS` to a value from 1 through 1,000,000. The frontend reads the effective limit from `GET /api/config`, displays a character counter, and prevents input beyond it.
 

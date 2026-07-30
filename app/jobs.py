@@ -13,6 +13,7 @@ from threading import Lock
 from uuid import uuid4
 
 
+from app.audio_formats import AudioFormat
 from app.models import AudioJobStatus
 
 
@@ -20,7 +21,7 @@ TERMINAL_JOB_STATUSES = {"cancelled", "done", "failed"}
 
 TEXT_PREVIEW_LENGTH = 160
 
-DATABASE_SCHEMA_VERSION = 3
+DATABASE_SCHEMA_VERSION = 4
 
 DATABASE_PATH = Path(
     os.getenv(
@@ -51,6 +52,8 @@ class AudioJob:
     created_at: datetime
 
     updated_at: datetime
+
+    audio_format: AudioFormat = "wav"
 
     object_key: str | None = None
 
@@ -122,6 +125,9 @@ def _create_audio_job_schema(connection: sqlite3.Connection) -> None:
             error TEXT,
             progress INTEGER NOT NULL DEFAULT 0 CHECK (
                 progress BETWEEN 0 AND 100
+            ),
+            audio_format TEXT NOT NULL DEFAULT 'wav' CHECK (
+                audio_format IN ('wav', 'mp3', 'flac', 'ogg')
             )
         )
         """
@@ -202,6 +208,17 @@ def _migrate_audio_job_schema_v2_to_v3(connection: sqlite3.Connection) -> None:
     connection.execute("UPDATE audio_jobs SET progress = 100 WHERE status = 'done'")
 
 
+def _migrate_audio_job_schema_v3_to_v4(connection: sqlite3.Connection) -> None:
+
+    connection.execute(
+        """
+        ALTER TABLE audio_jobs
+        ADD COLUMN audio_format TEXT NOT NULL DEFAULT 'wav'
+        CHECK (audio_format IN ('wav', 'mp3', 'flac', 'ogg'))
+        """
+    )
+
+
 def initialize_audio_job_store() -> None:
 
     database_path = DATABASE_PATH.resolve()
@@ -226,9 +243,14 @@ def initialize_audio_job_store() -> None:
 
             elif schema_version == 1:
                 _migrate_audio_job_schema_v1_to_v3(connection)
+                schema_version = 4
 
             elif schema_version == 2:
                 _migrate_audio_job_schema_v2_to_v3(connection)
+                schema_version = 3
+
+            if schema_version == 3:
+                _migrate_audio_job_schema_v3_to_v4(connection)
 
             connection.execute(f"PRAGMA user_version = {DATABASE_SCHEMA_VERSION}")
 
@@ -257,6 +279,7 @@ def _row_to_audio_job(row: sqlite3.Row) -> AudioJob:
         text_preview=row["text_preview"],
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
+        audio_format=row["audio_format"],
         object_key=row["object_key"],
         summarized_text=row["summarized_text"],
         error=row["error"],
@@ -269,6 +292,7 @@ def create_audio_job_record(
     voice: str,
     text: str,
     summarize: bool,
+    audio_format: AudioFormat = "wav",
     job_id: str | None = None,
 ) -> AudioJob:
 
@@ -283,6 +307,7 @@ def create_audio_job_record(
         text_preview=build_text_preview(text),
         created_at=now,
         updated_at=now,
+        audio_format=audio_format,
     )
 
     with _connect() as connection:
@@ -300,8 +325,9 @@ def create_audio_job_record(
                 object_key,
                 summarized_text,
                 error,
-                progress
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                progress,
+                audio_format
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job.job_id,
@@ -316,6 +342,7 @@ def create_audio_job_record(
                 job.summarized_text,
                 job.error,
                 job.progress,
+                job.audio_format,
             ),
         )
 

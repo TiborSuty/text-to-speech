@@ -107,6 +107,7 @@ describe('api client', () => {
             language_code: 'a',
             host_voice: 'af_heart',
             guest_voice: 'af_bella',
+            audio_format: 'wav' as const,
         };
         const result = await approvePodcastWorkflow('workflow-123', approval);
         expect(fetchMock).toHaveBeenCalledWith('/api/podcast-workflows/workflow-123/approve', {
@@ -152,6 +153,7 @@ describe('api client', () => {
             language_code: 'a',
             voice: 'af_heart',
             summarize: false,
+            audio_format: 'wav',
         };
         const result = await generateAudio(payload);
         expect(fetchMock).toHaveBeenCalledWith('/api/audio', {
@@ -178,6 +180,7 @@ describe('api client', () => {
             language_code: 'a',
             voice: 'af_heart',
             summarize: false,
+            audio_format: 'wav',
         })).rejects.toThrow('Could not generate audio');
     });
     it('posts async audio job requests', async () => {
@@ -191,6 +194,7 @@ describe('api client', () => {
             language_code: 'a',
             voice: 'af_heart',
             summarize: false,
+            audio_format: 'mp3',
         };
         const result = await createAudioJob(payload);
         expect(fetchMock).toHaveBeenCalledWith('/api/audio-jobs', {
