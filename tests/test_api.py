@@ -271,18 +271,17 @@ def test_audio_job_generates_multi_speaker_script(monkeypatch):
     def fake_generate_segmented_audio_file(
         segments,
         language_code,
-        output_id,
-        progress_callback=None,
+        config,
     ):
 
         captured_segments.extend(segments)
         assert language_code == "a"
 
-        if progress_callback is not None:
-            assert progress_callback(50) is True
+        if config.progress_callback is not None:
+            assert config.progress_callback(50) is True
 
-        (AUDIO_DIR / f"{output_id}.wav").write_bytes(b"podcast-wave-data")
-        return f"{output_id}.wav"
+        (AUDIO_DIR / f"{config.output_id}.wav").write_bytes(b"podcast-wave-data")
+        return f"{config.output_id}.wav"
 
     monkeypatch.setattr(
         "app.main.generate_segmented_audio_file",

@@ -1,18 +1,11 @@
 import logging
-
 import os
-
+from collections.abc import Callable
+from dataclasses import dataclass
 from queue import Queue
-
 from threading import Event, Lock, Thread
 
-from collections.abc import Callable
-
-from dataclasses import dataclass
-
-
 from app.models import AudioRequest
-
 
 DEFAULT_AUDIO_WORKER_COUNT = 1
 

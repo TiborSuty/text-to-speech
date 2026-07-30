@@ -1,8 +1,9 @@
+import math
+
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-
-from collections.abc import Callable
-
 from uuid import uuid4
 
 
@@ -28,6 +29,18 @@ PODCAST_SEGMENT_PAUSE_SECONDS = 0.35
 
 class AudioGenerationCancelled(Exception):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class AudioGenerationConfig:
+    output_id: str | None = None
+    progress_callback: Callable[[int], bool] | None = None
+    pause_seconds: float = PODCAST_SEGMENT_PAUSE_SECONDS
+    audio_format: AudioFormat = "wav"
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.pause_seconds) or self.pause_seconds < 0:
+            raise ValueError("Audio segment pause must be a finite non-negative value")
 
 
 def build_audio_file_name(
@@ -83,46 +96,83 @@ def generate_audio_file(
     return generate_segmented_audio_file(
         segments=[(text, voice)],
         language_code=language_code,
-        output_id=output_id,
-        progress_callback=progress_callback,
-        pause_seconds=0,
-        audio_format=audio_format,
+        config=AudioGenerationConfig(
+            output_id=output_id,
+            progress_callback=progress_callback,
+            pause_seconds=0,
+            audio_format=audio_format,
+        ),
     )
 
 
+def _validate_audio_segments(
+    segments: Sequence[tuple[str, str]],
+) -> int:
+    if not segments:
+        raise ValueError("At least one non-empty audio segment is required")
+
+    for text, voice in segments:
+        if not text.strip():
+            raise ValueError("Audio segment text must not be blank")
+
+        if not voice.strip():
+            raise ValueError("Audio segment voice must not be blank")
+
+    return sum(len(text) for text, _voice in segments)
+
+
+def _report_audio_progress(
+    processed_characters: int,
+    total_characters: int,
+    last_reported_progress: int,
+    progress_callback: Callable[[int], bool] | None,
+) -> int:
+    progress = min(
+        99,
+        max(1, round(processed_characters / total_characters * 100)),
+    )
+
+    if progress_callback is None or progress <= last_reported_progress:
+        return last_reported_progress
+
+    if not progress_callback(progress):
+        raise AudioGenerationCancelled
+
+    return progress
+
+
 def generate_segmented_audio_file(
-    segments: list[tuple[str, str]],
+    segments: Sequence[tuple[str, str]],
     language_code: str,
-    output_id: str | None = None,
-    progress_callback: Callable[[int], bool] | None = None,
-    pause_seconds: float = PODCAST_SEGMENT_PAUSE_SECONDS,
-    audio_format: AudioFormat = "wav",
+    config: AudioGenerationConfig | None = None,
 ) -> str:
 
-    AUDIO_DIR.mkdir(exist_ok=True)
+    resolved_config = config or AudioGenerationConfig()
 
-    resolved_output_id = output_id or uuid4().hex
+    total_characters = _validate_audio_segments(segments)
 
-    format_spec = get_audio_format_spec(audio_format)
+    resolved_output_id = resolved_config.output_id or uuid4().hex
 
-    file_name = build_audio_file_name(resolved_output_id, audio_format)
+    format_spec = get_audio_format_spec(resolved_config.audio_format)
+
+    file_name = build_audio_file_name(
+        resolved_output_id,
+        resolved_config.audio_format,
+    )
+
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
     output_path = AUDIO_DIR / file_name
 
-    temporary_path = AUDIO_DIR / f".{resolved_output_id}.tmp"
+    temporary_path = AUDIO_DIR / f".{file_name}.tmp"
 
     pipeline = KPipeline(lang_code=language_code)
-
-    total_characters = sum(len(text) for text, _voice in segments)
-
-    if not segments or total_characters == 0:
-        raise ValueError("At least one non-empty audio segment is required")
 
     processed_characters = 0
 
     last_reported_progress = 0
 
-    generated_chunk = False
+    generated_audio = False
 
     try:
         with sf.SoundFile(
@@ -133,43 +183,47 @@ def generate_segmented_audio_file(
             format=format_spec.soundfile_format,
             subtype=format_spec.soundfile_subtype,
         ) as output_file:
-            for segment_index, (text, voice) in enumerate(segments):
+            for text, voice in segments:
                 generator = pipeline(text, voice=voice)
+                segment_started = False
 
                 for generated_text, _phonemes, chunk_audio in generator:
+                    audio_chunk = np.asarray(chunk_audio).reshape(-1)
+
+                    if audio_chunk.size == 0:
+                        continue
+
                     if isinstance(generated_text, str):
                         processed_characters += len(generated_text)
 
-                    progress = min(
-                        99,
-                        max(
-                            1,
-                            round(
-                                processed_characters / max(total_characters, 1) * 100
-                            ),
-                        ),
+                    last_reported_progress = _report_audio_progress(
+                        processed_characters,
+                        total_characters,
+                        last_reported_progress,
+                        resolved_config.progress_callback,
                     )
 
                     if (
-                        progress_callback is not None
-                        and progress > last_reported_progress
+                        not segment_started
+                        and generated_audio
+                        and resolved_config.pause_seconds > 0
                     ):
-                        if not progress_callback(progress):
-                            raise AudioGenerationCancelled
+                        pause_sample_count = round(
+                            AUDIO_SAMPLE_RATE * resolved_config.pause_seconds
+                        )
+                        output_file.write(
+                            np.zeros(pause_sample_count, dtype=np.float32)
+                        )
 
-                        last_reported_progress = progress
+                    output_file.write(audio_chunk)
 
-                    output_file.write(np.asarray(chunk_audio))
+                    segment_started = True
+                    generated_audio = True
 
-                    generated_chunk = True
-
-                if segment_index < len(segments) - 1 and pause_seconds > 0:
-                    pause_sample_count = round(AUDIO_SAMPLE_RATE * pause_seconds)
-
-                    output_file.write(np.zeros(pause_sample_count, dtype=np.float32))
-
-        if not generated_chunk:
-            raise RuntimeError("Kokoro did not generate audio")
+                if not segment_started:
+                    raise RuntimeError(
+                        "Kokoro did not generate audio for an audio segment"
+                    )
 
         temporary_path.replace(output_path)
 

@@ -61,6 +61,63 @@ def test_audio_generation_service_renders_requested_format():
     }
 
 
+def test_audio_generation_service_configures_segmented_rendering():
+    received = {}
+
+    def generate_segmented_audio_file(
+        segments,
+        language_code,
+        config,
+    ):
+        received["segments"] = segments
+        received["language_code"] = language_code
+        received["config"] = config
+        return "podcast.ogg"
+
+    service = AudioGenerationService(
+        summarize_text=lambda text: text,
+        generate_audio_file=lambda *_args, **_kwargs: "unused.wav",
+        generate_segmented_audio_file=generate_segmented_audio_file,
+    )
+    request = AudioRequest(
+        text="Host\nGuest",
+        language_code="a",
+        audio_format="ogg",
+        segments=[
+            {
+                "speaker": "host",
+                "text": "Host",
+                "voice": "af_heart",
+            },
+            {
+                "speaker": "guest",
+                "text": "Guest",
+                "voice": "am_adam",
+            },
+        ],
+    )
+
+    def progress_callback(_progress):
+        return True
+
+    file_name = service.render(
+        request,
+        "af_heart",
+        output_id="podcast",
+        progress_callback=progress_callback,
+    )
+
+    assert file_name == "podcast.ogg"
+    assert received["segments"] == [
+        ("Host", "af_heart"),
+        ("Guest", "am_adam"),
+    ]
+    assert received["language_code"] == "a"
+    assert received["config"].output_id == "podcast"
+    assert received["config"].progress_callback is progress_callback
+    assert received["config"].audio_format == "ogg"
+
+
 def test_create_app_uses_supplied_settings_and_api_router():
     application = create_app(
         AppSettings(

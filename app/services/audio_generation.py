@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from app.audio import AudioGenerationConfig
 from app.models import AudioRequest
 
 
@@ -45,9 +46,7 @@ class AudioGenerationService:
             if request.audio_format == "wav"
             else {"audio_format": request.audio_format}
         )
-        output_options = (
-            {} if output_id is None else {"output_id": output_id}
-        )
+        output_options = {} if output_id is None else {"output_id": output_id}
         progress_options = (
             {}
             if progress_callback is None
@@ -58,9 +57,11 @@ class AudioGenerationService:
             return self.generate_segmented_audio_file(
                 [(segment.text, segment.voice) for segment in request.segments],
                 request.language_code,
-                **output_options,
-                **progress_options,
-                **audio_format_options,
+                config=AudioGenerationConfig(
+                    output_id=output_id,
+                    progress_callback=progress_callback,
+                    audio_format=request.audio_format,
+                ),
             )
 
         return self.generate_audio_file(

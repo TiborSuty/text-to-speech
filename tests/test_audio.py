@@ -105,9 +105,13 @@ def test_generate_audio_file_supports_multiple_formats(
         def __call__(self, text: str, voice: str):
             assert text == "Hello"
             assert voice == "af_heart"
-            yield text, None, np.sin(
-                np.linspace(0, 20 * np.pi, audio.AUDIO_SAMPLE_RATE)
-            ).astype(np.float32)
+            yield (
+                text,
+                None,
+                np.sin(np.linspace(0, 20 * np.pi, audio.AUDIO_SAMPLE_RATE)).astype(
+                    np.float32
+                ),
+            )
 
     monkeypatch.setattr(audio, "AUDIO_DIR", tmp_path)
     monkeypatch.setattr(audio, "KPipeline", FakePipeline)
@@ -148,8 +152,10 @@ def test_generate_segmented_audio_file_joins_speaker_turns(monkeypatch, tmp_path
             ("Thanks", "am_adam"),
         ],
         "a",
-        "podcast123",
-        pause_seconds=0.01,
+        config=audio.AudioGenerationConfig(
+            output_id="podcast123",
+            pause_seconds=0.01,
+        ),
     )
 
     assert rendered_segments == [
@@ -167,3 +173,62 @@ def test_generate_segmented_audio_file_joins_speaker_turns(monkeypatch, tmp_path
         np.zeros(round(audio.AUDIO_SAMPLE_RATE * 0.01)),
         abs=1e-4,
     )
+
+
+@pytest.mark.parametrize(
+    ("segments", "error_message"),
+    [
+        ([], "At least one"),
+        ([("   ", "af_heart")], "text must not be blank"),
+        ([("Hello", "   ")], "voice must not be blank"),
+    ],
+)
+def test_generate_segmented_audio_file_validates_before_pipeline_setup(
+    monkeypatch,
+    tmp_path,
+    segments,
+    error_message,
+):
+    class UnexpectedPipeline:
+        def __init__(self, lang_code: str):
+            raise AssertionError(f"Unexpected pipeline for {lang_code}")
+
+    monkeypatch.setattr(audio, "AUDIO_DIR", tmp_path)
+    monkeypatch.setattr(audio, "KPipeline", UnexpectedPipeline)
+
+    with pytest.raises(ValueError, match=error_message):
+        audio.generate_segmented_audio_file(segments, "a")
+
+    assert list(tmp_path.glob("*.wav")) == []
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+@pytest.mark.parametrize("pause_seconds", [-0.1, float("inf"), float("nan")])
+def test_audio_generation_config_rejects_invalid_pause(pause_seconds):
+    with pytest.raises(ValueError, match="finite non-negative"):
+        audio.AudioGenerationConfig(pause_seconds=pause_seconds)
+
+
+def test_generate_segmented_audio_file_rejects_empty_audio_chunks(
+    monkeypatch,
+    tmp_path,
+):
+    class FakePipeline:
+        def __init__(self, lang_code: str):
+            assert lang_code == "a"
+
+        def __call__(self, text: str, voice: str):
+            yield text, None, np.array([], dtype=np.float32)
+
+    monkeypatch.setattr(audio, "AUDIO_DIR", tmp_path)
+    monkeypatch.setattr(audio, "KPipeline", FakePipeline)
+
+    with pytest.raises(RuntimeError, match="did not generate audio"):
+        audio.generate_segmented_audio_file(
+            [("Hello", "af_heart")],
+            "a",
+            config=audio.AudioGenerationConfig(output_id="emptyjob"),
+        )
+
+    assert (tmp_path / "emptyjob.wav").exists() is False
+    assert list(tmp_path.glob(".*.tmp")) == []
