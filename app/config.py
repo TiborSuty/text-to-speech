@@ -1,7 +1,5 @@
 import os
-
 from dataclasses import dataclass
-
 
 DEFAULT_AUDIO_RETENTION_HOURS = 168.0
 

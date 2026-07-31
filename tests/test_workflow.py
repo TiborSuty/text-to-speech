@@ -1,19 +1,15 @@
-from langgraph.checkpoint.memory import InMemorySaver
-
-from langgraph.checkpoint.sqlite import SqliteSaver
-
-from langgraph.types import Command
-
 import sqlite3
 
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.types import Command
 
+from app import workflow
 from app.models import (
     PodcastScriptRequest,
     PodcastScriptResponse,
     PodcastWorkflowApprovalRequest,
 )
-
-from app import workflow
 
 
 def make_script(label: str) -> PodcastScriptResponse:

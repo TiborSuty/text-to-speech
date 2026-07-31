@@ -3,21 +3,16 @@ from threading import Event
 
 from fastapi.testclient import TestClient
 
-
 from app.audio import AUDIO_DIR
-
 from app.main import app
-
-from app.models import AUDIO_MAX_TEXT_CHARACTERS
-
 from app.models import (
+    AUDIO_MAX_TEXT_CHARACTERS,
     AudioJobCreateResponse,
     PodcastScriptResponse,
     PodcastWorkflowApprovalRequest,
     PodcastWorkflowResponse,
 )
 from app.text import PodcastScriptError, SummarizationError
-
 
 client = TestClient(app)
 

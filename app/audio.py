@@ -1,16 +1,12 @@
 import math
-
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-
 import numpy as np
-
 import soundfile as sf
-
 from kokoro import KPipeline
 
 from app.audio_formats import (
@@ -18,7 +14,6 @@ from app.audio_formats import (
     AudioFormat,
     get_audio_format_spec,
 )
-
 
 AUDIO_DIR = Path(__file__).resolve().parent.parent / "audios"
 

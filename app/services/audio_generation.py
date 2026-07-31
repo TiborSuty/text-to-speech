@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from app.audio import AudioGenerationConfig
 from app.models import AudioRequest
 
-
 AudioGenerator = Callable[..., str]
 ProgressCallback = Callable[[int], bool]
 Summarizer = Callable[[str], str]

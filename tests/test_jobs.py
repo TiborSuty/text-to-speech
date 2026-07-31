@@ -1,6 +1,5 @@
 from datetime import UTC, datetime, timedelta
 
-
 from app.jobs import (
     DATABASE_SCHEMA_VERSION,
     complete_audio_job_record,

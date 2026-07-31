@@ -1,26 +1,18 @@
 import os
-
 import shutil
-
 from datetime import timedelta
-
 from pathlib import Path
-
 from typing import Protocol
-
 from urllib.parse import urlsplit
-
 
 from minio import Minio
 from minio.error import S3Error
-
 
 from app.audio import AUDIO_DIR
 from app.audio_formats import (
     get_audio_format_from_file_name,
     get_audio_format_spec,
 )
-
 
 DEFAULT_AUDIO_BUCKET = "audio"
 

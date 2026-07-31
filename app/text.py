@@ -1,15 +1,10 @@
+import os
 import re
 
-import os
-
-
 from langchain_core.prompts import ChatPromptTemplate
-
 from langchain_ollama import ChatOllama
 
-
 from app.models import PodcastScriptRequest, PodcastScriptResponse
-
 
 SUMMARY_TEMPLATE = """
 Summarize the following text by highlighting the key points.

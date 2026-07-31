@@ -1,9 +1,6 @@
 import os
-
 import tempfile
-
 from pathlib import Path
-
 
 os.environ["AUDIO_JOBS_DB_PATH"] = str(
     Path(tempfile.mkdtemp(prefix="text-to-speech-tests-")) / "audio_jobs.db"

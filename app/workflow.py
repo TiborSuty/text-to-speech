@@ -1,26 +1,15 @@
 import atexit
-
 import os
-
 import sqlite3
-
 from threading import Lock
-
 from typing import Callable, TypedDict
-
 from uuid import uuid4
 
-
-from langgraph.checkpoint.sqlite import SqliteSaver
-
-from langgraph.graph import END, START, StateGraph
-
-from langgraph.types import Command, interrupt
-
 from langchain_ollama import ChatOllama
-
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 from pydantic import BaseModel, Field, field_validator
-
 
 from app.models import (
     PodcastScriptRequest,
@@ -28,9 +17,7 @@ from app.models import (
     PodcastWorkflowApprovalRequest,
     PodcastWorkflowResponse,
 )
-
 from app.text import OLLAMA_BASE_URL, OLLAMA_MODEL, PODCAST_DURATION_GUIDES
-
 
 MAX_PODCAST_REVISIONS = 2
 

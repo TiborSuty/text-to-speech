@@ -1,24 +1,14 @@
 import asyncio
-
-from contextlib import asynccontextmanager
-
 import json
-
 from collections.abc import AsyncIterator
-
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from threading import Lock
 from typing import Annotated
 
-from datetime import UTC, datetime, timedelta
-
-from threading import Lock
-
-
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Response
-
 from fastapi.middleware.cors import CORSMiddleware
-
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
-
 
 from app.audio import (
     AUDIO_DIR,
@@ -32,9 +22,7 @@ from app.audio_formats import (
     get_audio_format_from_file_name,
     get_audio_format_spec,
 )
-
 from app.config import AppSettings, settings
-
 from app.jobs import (
     TERMINAL_JOB_STATUSES,
     AudioJob,
@@ -54,14 +42,12 @@ from app.jobs import (
     update_audio_job_progress,
     update_audio_job_status,
 )
-
 from app.languages import (
     SUPPORTED_LANGUAGES,
     get_default_voice,
     is_supported_language_code,
     is_supported_voice,
 )
-
 from app.models import (
     AUDIO_MAX_TEXT_CHARACTERS,
     AppConfigResponse,
@@ -76,21 +62,16 @@ from app.models import (
     PodcastWorkflowApprovalRequest,
     PodcastWorkflowResponse,
 )
-
 from app.services.audio_generation import AudioGenerationService
 from app.services.podcast import build_podcast_audio_request
-
+from app.storage import AudioObjectStorage, create_audio_object_storage
 from app.text import (
     PodcastScriptError,
     SummarizationError,
     create_podcast_script,
     summarize_text,
 )
-
-from app.storage import AudioObjectStorage, create_audio_object_storage
-
 from app.worker import AudioJobTask, AudioWorkerPool, get_audio_worker_count
-
 from app.workflow import (
     PodcastWorkflowError,
     PodcastWorkflowNotFoundError,
@@ -100,7 +81,6 @@ from app.workflow import (
     link_podcast_audio_job,
     start_podcast_workflow,
 )
-
 
 audio_storage = create_audio_object_storage()
 

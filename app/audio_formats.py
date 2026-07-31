@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from typing import Literal, cast
 
-
 AudioFormat = Literal["wav", "mp3", "flac", "ogg"]
 
 
